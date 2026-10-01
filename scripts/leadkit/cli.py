@@ -287,19 +287,32 @@ def cmd_pool(args: argparse.Namespace) -> int:
 
 
 # ---------------- 参数解析 ----------------
+def _common(top: bool) -> argparse.ArgumentParser:
+    """全局参数。顶层和每个子命令各挂一份，所以 `leadctl --json pool stats` 与 `leadctl pool stats --json` 都能用。
+
+    坑点：argparse 里子命令的默认值会覆盖顶层已解析的值。所以子命令版本一律用
+    SUPPRESS 作默认（没写就不设置该属性），真正的默认值只在顶层设一次。
+    """
+    sup = argparse.SUPPRESS
+    c = argparse.ArgumentParser(add_help=False)
+    c.add_argument("--workdir", default=None if top else sup, help="工作区目录（默认 $LEADKIT_HOME 或 ~/.leadkit）")
+    c.add_argument("--profile", default=DEFAULT_PROFILE if top else sup,
+                   help=f"行业/地区配置（默认 {DEFAULT_PROFILE}，可用 $LEADKIT_PROFILE 改）")
+    c.add_argument("-v", "--verbose", action="store_true", default=False if top else sup, help="显示 DEBUG 日志")
+    c.add_argument("-q", "--quiet", action="store_true", default=False if top else sup, help="只显示警告和错误")
+    c.add_argument("--json", action="store_true", default=False if top else sup, help="结果以 JSON 输出到 stdout")
+    return c
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="leadctl",
+        parents=[_common(True)],
         description="公开评论获客意向工具：扩词 → 受限采集 → 打分 → 人工池。只做判断，不评论、不私信。",
-        epilog="先跑 `leadctl doctor` 看环境；完整流程见 README.md。",
+        epilog="先跑 `leadctl doctor` 看环境；完整流程见 README.md。全局参数写在子命令前后都行。",
     )
     p.add_argument("--version", action="version", version=f"leadctl {__version__}")
-    common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--workdir", help="工作区目录（默认 $LEADKIT_HOME 或 ~/.leadkit）")
-    common.add_argument("--profile", default=DEFAULT_PROFILE, help=f"行业/地区配置（默认 {DEFAULT_PROFILE}，可用 $LEADKIT_PROFILE 改）")
-    common.add_argument("-v", "--verbose", action="store_true", help="显示 DEBUG 日志")
-    common.add_argument("-q", "--quiet", action="store_true", help="只显示警告和错误")
-    common.add_argument("--json", action="store_true", help="结果以 JSON 输出到 stdout")
+    common = _common(False)
     sub = p.add_subparsers(dest="cmd", required=True, metavar="<命令>")
 
     sub.add_parser("profiles", parents=[common], help="列出可用 profile").set_defaults(fn=cmd_profiles)

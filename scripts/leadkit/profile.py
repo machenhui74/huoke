@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import tomllib
 from dataclasses import dataclass, field
+from functools import lru_cache
 from datetime import timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any
@@ -31,15 +32,28 @@ class ProfileError(Exception):
     """profile 缺失或格式不对。"""
 
 
+# 这些时区当前都是固定 UTC+8、没有夏令时：缺时区库时用固定偏移结果完全等价。
+_FIXED_UTC8 = {"Asia/Shanghai", "Asia/Chongqing", "Asia/Harbin", "PRC", "Asia/Hong_Kong", "Asia/Macau", "Asia/Taipei", "Asia/Singapore"}
+
+
+@lru_cache(maxsize=None)
 def get_tz(name: str) -> tzinfo:
-    """取时区；Windows 没装 tzdata 时回落到固定 UTC+8，避免整个流程因此崩溃。"""
+    """取时区。
+
+    Windows 默认不带时区库（需要 pip install tzdata）。分两种情况：
+    - 无夏令时的 +8 时区：回落到固定偏移，结果一致，只在 DEBUG 日志里提一句；
+    - 其他时区：回落会让日配额和冷却算错几个小时，宁可报错也不静默算错。
+    lru_cache：同一个名字只解析一次，避免每次调用都重复刷日志。
+    """
     try:
         from zoneinfo import ZoneInfo
 
         return ZoneInfo(name)
-    except Exception:  # ZoneInfoNotFoundError / ImportError
-        LOG.warning("时区 %s 不可用（缺 tzdata?），回落到固定 UTC+8", name)
-        return timezone(timedelta(hours=8))
+    except Exception as exc:  # ZoneInfoNotFoundError / ImportError
+        if name in _FIXED_UTC8:
+            LOG.debug("系统没有时区库，%s 使用固定 UTC+8（等价）。pip install tzdata 可消除此回落", name)
+            return timezone(timedelta(hours=8), name)
+        raise ProfileError(f"本机找不到时区「{name}」（Windows 默认不带时区库）。请运行 pip install tzdata 后重试") from exc
 
 
 @dataclass

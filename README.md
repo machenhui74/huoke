@@ -218,6 +218,10 @@ ln -s "$(pwd)" ~/.cursor/skills/lead-intake
 | `doctor` 报找不到 uv / node | 按提示安装；node 只有抖音才需要 |
 | 扫码窗口没出现 | 确认装了 Chrome；非默认路径时在 profile 的 `[collect.overrides]` 里设 `CUSTOM_BROWSER_PATH` |
 | Windows 中文乱码 | 用 PowerShell 7 或 `chcp 65001`；工具自身已强制 UTF-8 输出 |
+| Windows：uv 已装但提示「不在 PATH」 | 工具会自动在 `~/.local/bin`、`%LOCALAPPDATA%\Programs\uv` 等常见位置找并直接使用，无需处理；找不到时设环境变量 `LEADKIT_UV=uv.exe 的完整路径` |
+| Windows：`uv sync` 报 `WinError 183` | uv 构建缓存残留，与包本身无关。按提示运行 `uv cache clean <包名>`，再重跑 `leadctl setup` |
+| Windows：提示找不到时区 | `pip install tzdata`（中国大陆各时区缺库时会自动等价回落，其他时区必须装） |
+| Windows：中途终止后 Chrome 残留 | 工具会用 `taskkill /T /F` 结束整棵进程树；若仍有残留，到任务管理器结束 chrome 即可 |
 | 任何未预期错误 | 看 `~/.leadkit/logs/leadkit.log`，或加 `-v` 重跑 |
 
 ---

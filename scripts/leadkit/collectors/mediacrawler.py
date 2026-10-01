@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -24,6 +23,7 @@ from ..guard import (
 from ..logger import get_logger
 from ..paths import Workspace
 from ..profile import Profile
+from ..tools import ENV_UV, IS_WIN, find_uv, kill_tree
 from .base import CollectResult, Collector
 
 LOG = get_logger("collect.mediacrawler")
@@ -67,8 +67,8 @@ class MediaCrawlerCollector(Collector):
         bad = validate_plan(plan, limits, allow_exceed)
         bad += validate_overrides(self.profile.data.get("collect", {}).get("overrides", {}))
         bad += check_patch(self.mc_dir, platform_map, allow_unverified)
-        if not (shutil.which("uv") or self._venv_python()):
-            bad.append("找不到 uv，也没有 MediaCrawler/.venv。先运行 leadctl setup")
+        if self._python_cmd() is None:
+            bad.append(f"找不到 uv，也没有 MediaCrawler/.venv。先运行 leadctl setup（uv 已装但不在 PATH 时，设置 {ENV_UV}）")
         bad += self.ledger.check(plan, limits)
         LOG.info("预检完成：%d 项问题", len(bad))
         return bad
@@ -80,10 +80,23 @@ class MediaCrawlerCollector(Collector):
                 return p
         return None
 
+    def _python_cmd(self) -> list[str] | None:
+        """启动爬虫用的解释器命令。
+
+        优先直接用 MediaCrawler 的 .venv 解释器：少一层 uv 进程，终止信号能直达爬虫本体
+        （Windows 上终止 uv 不会连带终止它拉起的子进程）。没有 .venv 才退回 uv run。
+        """
+        venv = self._venv_python()
+        if venv:
+            return [str(venv)]
+        uv = find_uv()
+        return [uv.path, "run", "python"] if uv else None
+
     # ---------- 命令 ----------
     def build_command(self, plan: CollectPlan, platform_map: dict[str, Any], batch_dir: Path) -> list[str]:
         """所有限额都显式传参，不依赖上游 base_config 里的默认值。"""
-        py = ["uv", "run", "python"] if shutil.which("uv") else [str(self._venv_python()), ]
+        # 找不到解释器时用占位说明，别让 None 混进命令预览里（preflight 本来就会拒绝执行）
+        py = self._python_cmd() or ["<未找到 uv 或 .venv：先运行 leadctl setup>"]
         yn = lambda b: "yes" if b else "no"
         return py + [
             str(RUNNER),
@@ -116,6 +129,8 @@ class MediaCrawlerCollector(Collector):
 
     # ---------- 执行 ----------
     def run(self, plan: CollectPlan, platform_map: dict[str, Any], batch_id: str, batch_dir: Path) -> CollectResult:
+        if self._python_cmd() is None:  # 调用方应已通过 preflight，这里是最后一道保险
+            raise RuntimeError("找不到 uv 或 MediaCrawler/.venv，无法启动采集")
         batch_dir.mkdir(parents=True, exist_ok=True)
         cmd = self.build_command(plan, platform_map, batch_dir)
         ov = self.overrides(plan)
@@ -179,12 +194,18 @@ class MediaCrawlerCollector(Collector):
 
     @staticmethod
     def _stop(proc: subprocess.Popen) -> None:
-        """先礼后兵：SIGTERM 让上游有机会关浏览器，15 秒后还不退就强杀。"""
+        """先礼后兵：SIGTERM 让上游有机会关浏览器，15 秒后还不退就强杀。
+
+        Windows 没有可转发给子进程的「礼貌终止」，直接连子树一起杀，避免 Chrome 残留。
+        """
         if proc.poll() is not None:
+            return
+        if IS_WIN:
+            kill_tree(proc)
             return
         proc.terminate()
         try:
             proc.wait(timeout=15)
         except subprocess.TimeoutExpired:
             LOG.warning("进程 15 秒内未退出，强制结束")
-            proc.kill()
+            kill_tree(proc)
