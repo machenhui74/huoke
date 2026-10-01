@@ -1,0 +1,20 @@
+# 快手：列名按上游 store 代码核对，未实测；也没有搜索截断补丁，需 --allow-unverified-platform。
+[platform]
+name = "ks"
+label = "快手"
+mc_platform = "ks"
+verified = false
+
+[contents]
+post_id = "video_id"
+post_url = "video_url"
+title = "title"
+keyword = "source_keyword"
+
+[comments]
+comment_id = "comment_id"
+post_id = "video_id"
+text = "content"
+nickname = "nickname"
+user_hash = "creator_hash"
+created_at = "create_time"

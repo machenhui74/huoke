@@ -1,0 +1,143 @@
+# ============================================================
+# Profile 模板：复制本文件，改名为 <行业>_<地区>.toml，按注释改词表即可。
+# 内容是「家装 · 苏州」的占位示例，只用来演示结构，词表没有经过真实数据校验，
+# 上线前请用真实评论校准，并把人工看过的句子补进文末 [[cases]]。
+# 放置位置：skill 的 profiles/ 目录，或工作区的 profiles/ 目录（优先）。
+# 之后用 --profile <文件名不带后缀> 指定。
+# 完整字段说明见 education_taizhou.toml 里的注释。
+# ============================================================
+
+[meta]
+name = "template_renovation_suzhou"      # 必填。同时决定数据库文件名，不同 profile 的数据互不混
+description = "示例：家装装修 · 苏州"
+timezone = "Asia/Shanghai"
+
+[scoring]
+high_base = 70
+mid_base = 45
+low_base = 20
+weak_base = 15
+ready_threshold = 70
+review_threshold = 40
+non_parent_factor = 0.6        # 没有「目标客户身份词」时的打折系数（这里的「家长」泛指目标客户）
+parent_bonus = 10
+loc_bonus = 8
+budget_bonus = 10
+urgent_bonus = 10
+consult_floor = 48
+buyer_floor = 42
+special_cap = 65
+
+[words]
+# 高意向：明确在找人/问价/要报价
+high = ["求推荐", "有没有靠谱", "想装修", "准备装修", "多少钱一平", "报价", "哪家好", "求避雷后的推荐"]
+# 中意向：品类词、时间窗、在对比
+mid = ["全包", "半包", "硬装", "软装", "旧房翻新", "毛坯", "交房", "纠结", "对比"]
+low = ["了解一下", "收藏", "看看", "好贵"]
+# 目标客户身份词：业主本人在说自己的房子
+parent = ["我家", "我的房子", "新房", "老房", "刚拿钥匙", "业主"]
+budget = ["多少钱", "预算", "报价", "一平", "价格"]
+price_ask = ["多少钱", "什么价格", "报价多少", "一平多少"]
+price_ask_exempt = []
+enroll_ask = ["怎么预约", "怎么量房", "能上门吗"]    # 在本行业里等价于「怎么联系/预约」
+complaint = ["避雷", "投诉", "曝光", "烂尾", "跑路"]
+complaint_exempt = ["求避雷"]
+urgent = ["急", "赶紧", "下个月入住"]
+loc = ["附近", "同城", "本地"]
+institution = ["感谢业主", "欢迎业主"]               # 商家口吻
+self_child_patterns = []
+special = []                                         # 没有需要「只进复核」的特殊品类就留空
+consult_q = ["怎么办", "靠谱吗", "合适吗", "有必要吗"]
+ask_extra = ["合适", "能做", "接不接"]
+exclude = [
+  ["私信我", "广告/引流"], ["加微信", "广告/引流"], ["免费量房", "广告/引流"],
+  ["本公司", "广告/引流"], ["同行", "机构互推"], ["招商", "机构合作"],
+]
+
+[age]
+enabled = false        # 年龄线索是教育行业特有的，其它行业关掉
+
+[geo]
+core = ["姑苏区", "姑苏"]
+main = ["工业园区", "吴中", "相城"]
+city = ["苏州市", "苏州"]
+street = []
+outcity = ["上海", "杭州", "南京", "无锡"]
+street_false_positive = []
+bonus_core = 20
+bonus_main = 12
+bonus_city = 8
+bonus_street = 15
+bonus_cap = 20
+region_core = "姑苏"
+region_city = "苏州"
+
+# 问题归类：按顺序匹配，第一个命中的生效。可用谓词：complaint / price_ask / enroll_ask / age_known / parent
+[[problem_rules]]
+name = "求推荐"
+words = ["求推荐", "哪家好", "有没有靠谱"]
+
+[[problem_rules]]
+name = "投诉避雷"
+any_of = ["complaint"]
+
+[[problem_rules]]
+name = "问价"
+any_of = ["price_ask"]
+
+[[problem_rules]]
+name = "预约咨询"
+any_of = ["enroll_ask"]
+
+[problem_fallback]
+lifted = "问题咨询"
+
+[outreach]
+scene_from_problem = ["问价", "求推荐"]
+
+[keywords]
+min = 10
+max = 18
+demands = ["推荐", "报价", "怎么选", "哪家好", "多少钱"]
+primary = ["{p}{c}", "{p}{c}推荐", "{p}{c}报价", "{p}{c}怎么选", "{p}{c}哪家好", "{p}{c}多少钱"]
+extras = ["{p}{c}公司推荐", "{p}{c}靠谱吗", "{p}附近{c}", "{p}{c}口碑", "{p}{c}避雷", "{p}{c}多少钱一平"]
+
+# 限额只能收紧，不能超过代码硬上限（见 references/safety-redlines.md）
+[limits]
+max_keywords = 3
+max_notes_per_keyword = 5
+max_comments_per_note = 5
+max_concurrency = 1
+min_sleep_sec = 3
+sessions_per_day = 2
+cooldown_minutes = 30
+block_cooldown_hours = 2
+daily_note_details = 30
+daily_comments = 50
+
+[collect]
+platform = "xhs"
+login = "qrcode"
+retention_raw_days = 30
+retention_excluded_days = 14
+
+[collect.overrides]
+CDP_CONNECT_EXISTING = false
+AUTO_CLOSE_BROWSER = true
+
+# 自检用例：把「人工确认过的结论」写在这里，改词表后自动回归。示例只放两条显然的。
+[[cases]]
+text = "我家新房准备装修，求推荐苏州靠谱的装修公司"
+keyword = "苏州装修"
+status = "ready"
+parent = 1
+problem = "求推荐"
+strength = "高"
+
+[[cases]]
+text = "免费量房，加微信领方案"
+keyword = "苏州装修"
+status = "excluded"
+parent = 0
+problem = ""
+strength = "无"

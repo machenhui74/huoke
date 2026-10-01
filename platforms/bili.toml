@@ -1,0 +1,22 @@
+# B站：列名按上游 store 代码核对，未实测；没有搜索截断补丁。
+[platform]
+name = "bili"
+label = "B站"
+mc_platform = "bili"
+verified = false
+
+[contents]
+post_id = "video_id"
+post_url = "video_url"
+title = "title"
+keyword = "source_keyword"
+
+[comments]
+comment_id = "comment_id"
+post_id = "video_id"
+text = "content"
+nickname = "nickname"
+user_hash = "creator_hash"
+created_at = "create_time"
+like_count = "like_count"
+parent_comment_id = "parent_comment_id"

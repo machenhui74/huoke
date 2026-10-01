@@ -1,0 +1,32 @@
+# 抖音：aweme_id 对应统一的 post_id，aweme_url 对应 post_url。
+[platform]
+name = "dy"
+label = "抖音"
+mc_platform = "dy"
+verified = true
+
+[patch]
+file = "media_platform/douyin/help.py"
+core = "media_platform/douyin/core.py"
+marker = "truncate_search_aweme_items"
+
+[contents]
+post_id = "aweme_id"
+post_url = "aweme_url"
+title = "title"
+keyword = "source_keyword"
+
+[comments]
+comment_id = "comment_id"
+post_id = "aweme_id"
+text = "content"
+nickname = "nickname"
+user_hash = "creator_hash"
+created_at = "create_time"
+like_count = "like_count"
+parent_comment_id = "parent_comment_id"
+
+[monitor]
+keyword_re = 'Current keyword: (.+)$'
+detail_re = '\[store\.douyin\.update_douyin_aweme\]'
+comment_re = '\[store\.douyin\.update_dy_aweme_comment\]'

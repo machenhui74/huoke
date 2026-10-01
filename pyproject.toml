@@ -1,0 +1,11 @@
+[project]
+name = "lead-intake"
+version = "0.1.0"
+description = "公开评论获客意向筛选：扩词 → 受限采集 → 打分 → 人工池（只做判断，不触达）"
+requires-python = ">=3.11"   # 用到标准库 tomllib
+dependencies = []            # 零第三方依赖；采集后端 MediaCrawler 由 `leadctl setup` 单独安装
+
+# 本项目按「skill 目录」使用：python scripts/leadctl.py ...，不需要也不支持 pip install。
+# 这个文件只为让 uv / 编辑器识别 Python 版本。
+[tool.uv]
+package = false

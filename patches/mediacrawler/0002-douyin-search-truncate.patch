@@ -1,0 +1,194 @@
+diff --git a/media_platform/douyin/core.py b/media_platform/douyin/core.py
+index 10380a6..bf0619e 100644
+--- a/media_platform/douyin/core.py
++++ b/media_platform/douyin/core.py
+@@ -44,7 +44,7 @@ from . import media as douyin_media
+ from .client import DouYinClient
+ from .exception import DataFetchError
+ from .field import PublishTimeType
+-from .help import parse_video_info_from_url, parse_creator_info_from_url
++from .help import parse_video_info_from_url, parse_creator_info_from_url, truncate_search_aweme_items
+ from .login import DouYinLogin
+ 
+ 
+@@ -129,9 +129,9 @@ class DouYinCrawler(AbstractCrawler):
+ 
+     async def search(self) -> None:
+         utils.logger.info("[DouYinCrawler.search] Begin search douyin keywords")
+-        dy_limit_count = 10  # douyin limit page fixed value
+-        if config.CRAWLER_MAX_NOTES_COUNT < dy_limit_count:
+-            config.CRAWLER_MAX_NOTES_COUNT = dy_limit_count
++        dy_limit_count = 10  # douyin API page size; not a count floor
++        # 防封号：搜索页截断 — 保留用户配置上限，不再把 CRAWLER_MAX_NOTES_COUNT 强制抬到页大小
++        max_notes_count = config.CRAWLER_MAX_NOTES_COUNT
+         start_page = config.START_PAGE  # start page number
+         for keyword in config.KEYWORDS.split(","):
+             source_keyword_var.set(keyword)
+@@ -139,7 +139,8 @@ class DouYinCrawler(AbstractCrawler):
+             aweme_list: List[str] = []
+             page = 0
+             dy_search_id = ""
+-            while (page - start_page + 1) * dy_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
++            crawled_aweme_count = 0  # 按关键词累计，每词不超过上限
++            while crawled_aweme_count < max_notes_count:
+                 if page < start_page:
+                     utils.logger.info(f"[DouYinCrawler.search] Skip {page}")
+                     page += 1
+@@ -164,17 +165,27 @@ class DouYinCrawler(AbstractCrawler):
+                     utils.logger.error(f"[DouYinCrawler.search] search douyin keyword: {keyword} failed，账号也许被风控了。")
+                     break
+                 dy_search_id = posts_res.get("extra", {}).get("logid", "")
++                # 防封号：搜索页截断 — 进入存储/评论前截到剩余配额
++                aweme_infos = truncate_search_aweme_items(
++                    posts_res.get("data"),
++                    max_notes_count=max_notes_count,
++                    crawled_count=crawled_aweme_count,
++                )
++                utils.logger.info(
++                    f"[DouYinCrawler.search] Truncate search page to {len(aweme_infos)} notes "
++                    f"(crawled={crawled_aweme_count}, max={max_notes_count}, page_size≈{dy_limit_count})"
++                )
++                if not aweme_infos:
++                    break
+                 page_aweme_list = []
+-                for post_item in posts_res.get("data"):
+-                    try:
+-                        aweme_info: Dict = (post_item.get("aweme_info") or post_item.get("aweme_mix_info", {}).get("mix_items")[0])
+-                    except TypeError:
+-                        continue
+-                    aweme_list.append(aweme_info.get("aweme_id", ""))
+-                    page_aweme_list.append(aweme_info.get("aweme_id", ""))
++                for aweme_info in aweme_infos:
++                    aweme_id = aweme_info.get("aweme_id", "")
++                    aweme_list.append(aweme_id)
++                    page_aweme_list.append(aweme_id)
+                     await douyin_store.update_douyin_aweme(aweme_item=aweme_info)
+                     await self.download_media(aweme_item=aweme_info)
+-                
++                crawled_aweme_count += len(aweme_infos)
++
+                 # Batch get note comments for the current page
+                 await self.batch_get_note_comments(page_aweme_list)
+ 
+@@ -387,10 +398,8 @@ class DouYinCrawler(AbstractCrawler):
+             return browser_context
+ 
+         except Exception as e:
+-            utils.logger.error(f"[DouYinCrawler] CDP模式启动失败，回退到标准模式: {e}")
+-            # Fall back to standard mode
+-            chromium = playwright.chromium
+-            return await self.launch_browser(chromium, playwright_proxy, user_agent, headless)
++            utils.logger.error(f"[DouYinCrawler] CDP模式启动失败，不回退到 Playwright Chromium: {e}")
++            raise
+ 
+     async def close(self) -> None:
+         """Close browser context"""
+diff --git a/media_platform/douyin/help.py b/media_platform/douyin/help.py
+index 0d7e6ad..8673637 100644
+--- a/media_platform/douyin/help.py
++++ b/media_platform/douyin/help.py
+@@ -26,7 +26,7 @@
+ 
+ import random
+ import re
+-from typing import Optional
++from typing import Dict, List, Optional
+ 
+ import execjs
+ from playwright.async_api import Page
+@@ -164,6 +164,31 @@ def parse_creator_info_from_url(url: str) -> CreatorUrlInfo:
+     raise ValueError(f"Unable to parse creator ID from URL: {url}")
+ 
+ 
++
++def truncate_search_aweme_items(
++    items: List[Dict],
++    max_notes_count: int,
++    crawled_count: int = 0,
++) -> List[Dict]:
++    """防封号：搜索页截断 — 进入存储/评论前将作品列表截到剩余配额。
++
++    抽出 aweme_info（或合集首条）后按剩余额度切片，保证处理条数 ≤ CRAWLER_MAX_NOTES_COUNT。
++    """
++    remaining = max(0, int(max_notes_count) - int(crawled_count))
++    extracted: List[Dict] = []
++    for post_item in items or []:
++        if not isinstance(post_item, dict):
++            continue
++        try:
++            aweme_info = post_item.get("aweme_info") or post_item.get("aweme_mix_info", {}).get("mix_items")[0]
++        except (TypeError, AttributeError, KeyError, IndexError):
++            continue
++        if isinstance(aweme_info, dict):
++            extracted.append(aweme_info)
++    return extracted[:remaining]
++
++
++
+ if __name__ == '__main__':
+     # Test video URL parsing
+     print("=== Video URL Parsing Test ===")
+diff --git a/b/tests/test_douyin_search_truncate.py b/tests/test_douyin_search_truncate.py
+new file mode 100644
+index 0000000..0ec1113
+--- /dev/null
++++ b/tests/test_douyin_search_truncate.py
+@@ -0,0 +1,58 @@
++# -*- coding: utf-8 -*-
++"""静态验收：抖音搜索页截断保证处理条数 ≤ CRAWLER_MAX_NOTES_COUNT。
++
++不联网、不启动真实采数。配置为 5 时不得被页大小 10 抬高。
++"""
++
++import inspect
++
++from media_platform.douyin.core import DouYinCrawler
++from media_platform.douyin.help import truncate_search_aweme_items
++
++
++def _make_items(n: int, extra_invalid: bool = True):
++    items = [{"aweme_info": {"aweme_id": f"a{i}", "desc": f"t{i}"}} for i in range(n)]
++    if extra_invalid:
++        items.insert(0, {"aweme_mix_info": {}})
++        items.append({"not_a_video": True})
++    return items
++
++
++def test_truncate_first_page_to_max_five():
++    items = _make_items(10)
++    out = truncate_search_aweme_items(items, max_notes_count=5, crawled_count=0)
++    assert len(out) == 5
++    assert [i["aweme_id"] for i in out] == ["a0", "a1", "a2", "a3", "a4"]
++
++
++def test_truncate_remaining_on_second_page():
++    items = _make_items(10, extra_invalid=False)
++    out = truncate_search_aweme_items(items, max_notes_count=12, crawled_count=10)
++    assert len(out) == 2
++    assert out[0]["aweme_id"] == "a0"
++
++
++def test_truncate_when_already_at_limit():
++    items = _make_items(10)
++    out = truncate_search_aweme_items(items, max_notes_count=5, crawled_count=5)
++    assert out == []
++
++
++def test_truncate_keeps_mix_first_item():
++    items = [
++        {"aweme_mix_info": {"mix_items": [{"aweme_id": "mix0"}]}},
++        {"aweme_info": {"aweme_id": "plain1"}},
++    ]
++    out = truncate_search_aweme_items(items, max_notes_count=5, crawled_count=0)
++    assert [i["aweme_id"] for i in out] == ["mix0", "plain1"]
++
++
++def test_search_keeps_configured_max_of_five():
++    src = inspect.getsource(DouYinCrawler.search)
++    assert "config.CRAWLER_MAX_NOTES_COUNT = dy_limit_count" not in src
++    assert "config.CRAWLER_MAX_NOTES_COUNT =" not in src
++    assert "max_notes_count = config.CRAWLER_MAX_NOTES_COUNT" in src
++    assert "truncate_search_aweme_items" in src
++    assert "while crawled_aweme_count < max_notes_count" in src
++    # 页大小仍是接口固定值，但不再当作条数下限
++    assert "dy_limit_count = 10" in src

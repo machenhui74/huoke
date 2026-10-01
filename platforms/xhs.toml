@@ -1,0 +1,36 @@
+# 小红书：MediaCrawler 输出列 → 统一字段。
+# 新增平台只需复制本文件并改列名，不用写代码。
+[platform]
+name = "xhs"
+label = "小红书"
+mc_platform = "xhs"            # 传给 MediaCrawler 的 --platform
+verified = true                # true = 已实测，且有搜索截断补丁可校验
+
+# 校验补丁是否已打上：文件里必须同时出现标记，否则 guard 拒绝采集
+[patch]
+file = "media_platform/xhs/help.py"
+core = "media_platform/xhs/core.py"
+marker = "truncate_search_note_items"
+
+[contents]                      # search_contents_*.csv
+post_id = "note_id"
+post_url = "note_url"
+title = "title"
+keyword = "source_keyword"
+
+[comments]                      # search_comments_*.csv
+comment_id = "comment_id"
+post_id = "note_id"
+text = "content"
+nickname = "nickname"
+user_hash = "creator_hash"
+created_at = "create_time"
+like_count = "like_count"
+parent_comment_id = "parent_comment_id"
+
+# 运行时监控：从 MediaCrawler 的日志里数「每词实际拉取的笔记数」，超限立刻终止。
+# 正则已用 2026-09-30 的真实日志验证过。
+[monitor]
+keyword_re = 'Current search keyword: (.+)$'     # 换词时计数清零
+detail_re = 'Begin get note detail'              # 每拉一篇笔记详情一条
+comment_re = '\[store\.xhs\.update_xhs_note_comment\]'

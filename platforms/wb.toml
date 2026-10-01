@@ -1,0 +1,22 @@
+# 微博：列名按上游 store 代码核对，未实测；没有搜索截断补丁。微博没有标题，用正文代替。
+[platform]
+name = "wb"
+label = "微博"
+mc_platform = "wb"
+verified = false
+
+[contents]
+post_id = "note_id"
+post_url = "note_url"
+title = "content"
+keyword = "source_keyword"
+
+[comments]
+comment_id = "comment_id"
+post_id = "note_id"
+text = "content"
+nickname = "nickname"
+user_hash = "creator_hash"
+created_at = "create_time"
+like_count = "comment_like_count"
+parent_comment_id = "parent_comment_id"

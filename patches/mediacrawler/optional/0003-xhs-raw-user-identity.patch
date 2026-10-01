@@ -1,0 +1,17 @@
+diff --git a/store/xhs/__init__.py b/store/xhs/__init__.py
+index 47b5c71..e583a6f 100644
+--- a/store/xhs/__init__.py
++++ b/store/xhs/__init__.py
+@@ -132,8 +132,10 @@ async def update_xhs_note_comment(note_id: str, comment_item: Dict):
+         "create_time": comment_item.get("create_time"),  # Comment time
+         "note_id": note_id,  # Note ID
+         "content": comment_item.get("content"),  # Comment content
+-        "creator_hash": anonymize_user_id(user_info.get("user_id")),  # 创作者匿名哈希(不存原始 user_id)
+-        "nickname": mask_nickname(user_info.get("nickname")),  # 用户昵称(已脱敏)
++        # 需求表要评论人平台 ID 和完整用户名，不再哈希、不再中间打码。
++        "user_id": str(user_info.get("user_id") or ""),
++        "creator_hash": anonymize_user_id(user_info.get("user_id")),
++        "nickname": user_info.get("nickname") or "",
+         "sub_comment_count": comment_item.get("sub_comment_count", 0),  # Sub-comment count
+         "pictures": ",".join(comment_pictures),  # Comment pictures
+         "parent_comment_id": target_comment.get("id", ""),  # Parent comment ID
