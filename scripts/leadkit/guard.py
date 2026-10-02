@@ -23,14 +23,20 @@ LOG = get_logger("guard")
 
 # 硬上限（对应 references/safety-redlines.md §1）。
 # CEILING 类：值越大越危险，只能往小调；FLOOR 类：值越小越危险，只能往大调。
+#
+# 2026-10-02 按使用者指示放宽（见红线文档变更记录）：
+#   词数 3→10、单帖评论 5→10、日笔记 30→50、日评论 50→500。
+#   即一次完整采集 = 10 词 × 5 篇 = 50 篇笔记 × 10 条 = 500 条评论。
+#   旧档位（3 / 5 / 5 / 30 / 50）是回退基线：一旦出现风控信号就改回去，并按红线 §9 记录。
+#   并发、间隔下限、冷却、代理/二级评论/媒体/登录方式等「零例外」项没有动。
 HARD_CEILING = {
-    "max_keywords": 3,
+    "max_keywords": 10,
     "max_notes_per_keyword": 5,
-    "max_comments_per_note": 5,
+    "max_comments_per_note": 10,
     "max_concurrency": 1,
     "sessions_per_day": 2,
-    "daily_note_details": 30,
-    "daily_comments": 50,
+    "daily_note_details": 50,
+    "daily_comments": 500,
 }
 HARD_FLOOR = {
     "min_sleep_sec": 3,
@@ -213,20 +219,28 @@ class Ledger:
         today = self.now().date().isoformat()
         return [e for e in events if e.get("ts", "")[:10] == today]
 
-    def usage_today(self) -> dict[str, int]:
-        """今日已用：每个批次取 end 的实际值，没有 end（崩溃/中断）按 start 的估算值算，宁多勿少。"""
-        by_batch: dict[str, dict[str, int]] = {}
+    def usage_today(self, platform: str | None = None) -> dict[str, int]:
+        """今日已用：每个批次取 end 的实际值，没有 end（崩溃/中断）按 start 的估算值算，宁多勿少。
+
+        platform 给定时只统计该平台：平台风控按账号算，小红书和抖音是两个独立账号，额度分开计
+        （2026-10-02 用户决定）。老台账里没有 platform 字段的批次无法归属，保守地算进每个平台。
+        不传 platform 则是全部平台合计（doctor 展示用）。冷却和封控锁不受影响，仍是全局的。
+        """
+        by_batch: dict[str, dict[str, Any]] = {}
         for e in self._today(self.events()):
             b = e.get("batch")
             if e["event"] == "start":
-                by_batch[b] = {"notes": e.get("est_notes", 0), "comments": e.get("est_comments", 0)}
+                by_batch[b] = {"notes": e.get("est_notes", 0), "comments": e.get("est_comments", 0),
+                               "platform": e.get("platform") or ""}
             elif e["event"] == "end" and b in by_batch:
-                by_batch[b] = {"notes": e.get("actual_notes", by_batch[b]["notes"]),
+                by_batch[b] = {**by_batch[b],   # 保留 platform，只用实际值覆盖估算值
+                               "notes": e.get("actual_notes", by_batch[b]["notes"]),
                                "comments": e.get("actual_comments", by_batch[b]["comments"])}
+        mine = [v for v in by_batch.values() if platform is None or v["platform"] in ("", platform)]
         return {
-            "sessions": len(by_batch),
-            "notes": sum(v["notes"] for v in by_batch.values()),
-            "comments": sum(v["comments"] for v in by_batch.values()),
+            "sessions": len(mine),
+            "notes": sum(v["notes"] for v in mine),
+            "comments": sum(v["comments"] for v in mine),
         }
 
     def check(self, plan: CollectPlan, limits: dict[str, int]) -> list[str]:
@@ -235,13 +249,13 @@ class Ledger:
         now = self.now()
         events = self.events()
         today = self._today(events)
-        use = self.usage_today()
+        use = self.usage_today(plan.platform)   # 按本次要采的平台计额度
         if use["sessions"] >= limits["sessions_per_day"]:
-            bad.append(f"今日已采 {use['sessions']} 次，达到上限 {limits['sessions_per_day']}")
+            bad.append(f"今日{plan.platform}已采 {use['sessions']} 次，达到上限 {limits['sessions_per_day']}")
         if use["notes"] + plan.est_notes > limits["daily_note_details"]:
-            bad.append(f"今日笔记详情已用 {use['notes']}，再采 {plan.est_notes} 会超过 {limits['daily_note_details']}")
+            bad.append(f"今日{plan.platform}笔记详情已用 {use['notes']}，再采 {plan.est_notes} 会超过 {limits['daily_note_details']}")
         if use["comments"] + plan.est_comments > limits["daily_comments"]:
-            bad.append(f"今日评论已用 {use['comments']}，再采 {plan.est_comments} 会超过 {limits['daily_comments']}")
+            bad.append(f"今日{plan.platform}评论已用 {use['comments']}，再采 {plan.est_comments} 会超过 {limits['daily_comments']}")
 
         # 两次采集的冷却：以上一次 end（或 start）为准
         finished = [e for e in events if e["event"] in ("end", "block")]

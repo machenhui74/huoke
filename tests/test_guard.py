@@ -23,7 +23,7 @@ class PlanTest(unittest.TestCase):
 
     def test_each_hard_limit(self):
         cases = [
-            dict(keywords=list("abcd")), dict(notes_per_keyword=6), dict(comments_per_note=6),
+            dict(keywords=list("abcdefghijk")), dict(notes_per_keyword=6), dict(comments_per_note=11),
             dict(concurrency=2), dict(sleep_sec=2), dict(sub_comments=True), dict(proxy=True),
             dict(media=True), dict(login="phone"), dict(keywords=["a", "a"]),
         ]
@@ -33,12 +33,12 @@ class PlanTest(unittest.TestCase):
 
     def test_profile_cannot_raise_limits(self):
         """profile 写大了也会被压回硬上限。"""
-        self.assertEqual(limits(max_keywords=12)["max_keywords"], 3)
+        self.assertEqual(limits(max_keywords=12)["max_keywords"], 10)
         self.assertEqual(limits(min_sleep_sec=0)["min_sleep_sec"], 3)
 
     def test_exceed_flag_only_relaxes_numeric_limits(self):
         lim = effective_limits({"max_keywords": 12}, True)
-        plan = CollectPlan(**{**OK_PLAN, "keywords": list("abcdef"), "proxy": True})
+        plan = CollectPlan(**{**OK_PLAN, "keywords": list("abcdefghijklm"), "proxy": True})
         bad = validate_plan(plan, lim, allow_exceed=True)
         self.assertEqual(len(bad), 1)  # 关键词数被放行，代理仍然拒绝
         self.assertIn("代理", bad[0])
@@ -94,9 +94,43 @@ class LedgerTest(unittest.TestCase):
         self.assertTrue(any("30 分钟" in b for b in self.ledger.check(self.plan, self.lim)))
 
     def test_daily_quota_uses_actuals(self):
-        self._run("b1", 15, 45)
+        self._run("b1", 50, 495)  # 当天已用满
         small = CollectPlan(**{**OK_PLAN, "keywords": ["a"], "comments_per_note": 3})
         self.assertTrue(any("评论" in b for b in self.ledger.check(small, effective_limits({"cooldown_minutes": 0}, True))))
+
+    def _run_on(self, platform, batch, notes, comments):
+        self.ledger.append(event="start", batch=batch, platform=platform, est_notes=notes, est_comments=comments)
+        self.ledger.append(event="end", batch=batch, status="ok", actual_notes=notes, actual_comments=comments)
+
+    def test_quota_is_counted_per_platform(self):
+        """小红书和抖音是两个账号：小红书用满，不应挡住抖音；但挡住小红书自己。"""
+        self._run_on("xhs", "b1", 50, 180)
+        no_cd = effective_limits({"cooldown_minutes": 0}, True)
+        dy = CollectPlan(**{**OK_PLAN, "platform": "dy", "keywords": ["a"], "comments_per_note": 3})
+        xhs = CollectPlan(**{**OK_PLAN, "keywords": ["a"], "comments_per_note": 3})
+        self.assertEqual(self.ledger.check(dy, no_cd), [])
+        bad = self.ledger.check(xhs, no_cd)
+        self.assertTrue(any("xhs" in b and "笔记" in b for b in bad), bad)
+        self.assertEqual(self.ledger.usage_today("dy")["notes"], 0)
+        self.assertEqual(self.ledger.usage_today()["notes"], 50)            # 不传平台 = 合计
+
+    def test_same_platform_still_accumulates(self):
+        self._run_on("dy", "b1", 30, 100)
+        self._run_on("dy", "b2", 20, 100)
+        self.assertEqual(self.ledger.usage_today("dy")["notes"], 50)
+        self.assertEqual(self.ledger.usage_today("dy")["sessions"], 2)
+
+    def test_legacy_batches_without_platform_count_everywhere(self):
+        """老台账没有 platform 字段，无法归属：保守地算进每个平台，宁多勿少。"""
+        self._run("legacy", 40, 100)
+        self.assertEqual(self.ledger.usage_today("dy")["notes"], 40)
+        self.assertEqual(self.ledger.usage_today("xhs")["notes"], 40)
+
+    def test_cooldown_and_block_lock_stay_global(self):
+        """额度分平台，但冷却和封控锁仍是全局：一个平台刚被风控，另一个也不该马上接着采。"""
+        self.ledger.append(event="block", batch="b1", platform="xhs", reason="验证码")
+        dy = CollectPlan(**{**OK_PLAN, "platform": "dy"})
+        self.assertTrue(any("风控" in b for b in self.ledger.check(dy, self.lim)))
 
     def test_crashed_run_counts_by_estimate(self):
         """只有 start 没有 end（进程崩了）：按估算值计入，宁多勿少。"""

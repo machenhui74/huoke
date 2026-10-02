@@ -27,6 +27,10 @@ urgent_bonus = 10
 consult_floor = 48
 buyer_floor = 42
 special_cap = 65
+# 可选：明确咨询（命中 price_ask / enroll_ask / age_ask 之一）直接抬到这个分，进 ready 并标红。
+# 0 = 关闭（默认）。适合「评论区里问价、问约课就是最强意向」的品类；仍需人工抽检才能触达。
+# 机构口吻、投诉、special 特殊需求不会被抬。
+inquiry_ready_score = 0
 
 [words]
 # 高意向：明确在找人/问价/要报价
@@ -47,6 +51,8 @@ loc = ["附近", "同城", "本地"]
 institution = ["感谢业主", "欢迎业主"]               # 商家口吻
 self_child_patterns = []
 special = []                                         # 没有需要「只进复核」的特殊品类就留空
+# 问入门资格（几岁能上 / 多大孩子能上）。配合 inquiry_ready_score 使用，可选。
+age_ask = []
 consult_q = ["怎么办", "靠谱吗", "合适吗", "有必要吗"]
 ask_extra = ["合适", "能做", "接不接"]
 exclude = [
@@ -104,26 +110,36 @@ extras = ["{p}{c}公司推荐", "{p}{c}靠谱吗", "{p}附近{c}", "{p}{c}口碑
 
 # 限额只能收紧，不能超过代码硬上限（见 references/safety-redlines.md）
 [limits]
-max_keywords = 3
+max_keywords = 10
 max_notes_per_keyword = 5
-max_comments_per_note = 5
+max_comments_per_note = 10
 max_concurrency = 1
 min_sleep_sec = 3
 sessions_per_day = 2
 cooldown_minutes = 30
 block_cooldown_hours = 2
-daily_note_details = 30
-daily_comments = 50
+daily_note_details = 50
+daily_comments = 500
 
 [collect]
 platform = "xhs"
 login = "qrcode"
 retention_raw_days = 30
 retention_excluded_days = 14
+max_session_minutes = 120     # 单次会话总时长保险
 
 [collect.overrides]
 CDP_CONNECT_EXISTING = false
 AUTO_CLOSE_BROWSER = true
+
+# 采集节奏：随机间隔 + 偶尔长停顿。只会比间隔下限更慢，不增加请求数。不写这一段也会用同样的默认值。
+[collect.pacing]
+enabled = true
+median_factor = 2.5
+sigma = 0.5
+cap_factor = 5.0
+long_pause_prob = 0.15
+long_pause_sec = [20, 60]
 
 # 自检用例：把「人工确认过的结论」写在这里，改词表后自动回归。示例只放两条显然的。
 [[cases]]
@@ -141,3 +157,18 @@ status = "excluded"
 parent = 0
 problem = ""
 strength = "无"
+
+# ---------- 分层地域过滤（可选，默认关闭；完整示例见 gantong_taizhou.toml）----------
+# 平台 IP 属地只到省，所以靠「评论正文地名 / 笔记标题与话题标签 / 昵称 / IP 省级属地 / 自述外地」多层证据叠加。
+# 状态：local_confirmed local_likely note_local weak unknown no_context out_of_region conflict
+# 动作：keep（不改判）/ review（最高进待复核）/ exclude（排除）。只会压低或排除，从不抬分。
+# [geo_filter]
+# enabled = false
+# ip_province = ["浙江"]
+# need_context = [["天台", ["台州", "天台县"]]]    # 单独出现易歧义的词，同文要有语境词才算
+# [geo_filter.actions]
+# out_of_region = "exclude"
+# [geo_filter.actions_by_platform.dy]               # 按平台覆盖
+# unknown = "exclude"
+# [export]
+# xlsx_geo_column = false                           # true = Excel 末尾多一列「地域把握」

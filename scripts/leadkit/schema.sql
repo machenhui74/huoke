@@ -42,6 +42,11 @@ CREATE TABLE IF NOT EXISTS leads (
   geo_hit INTEGER NOT NULL DEFAULT 0,
   target_region TEXT,
   geo_evidence TEXT,
+  -- 分层地域过滤（[geo_filter]）：状态、命中的证据编码、评论者 IP 省级属地、笔记上下文（重打分不再依赖 30 天后会清掉的原始评论）
+  geo_state TEXT,
+  geo_signals TEXT,
+  ip_province TEXT,
+  note_context TEXT,
   -- 触达（人工；v0）
   scene TEXT,
   reach_status TEXT NOT NULL DEFAULT 'pending_review'

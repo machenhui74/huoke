@@ -14,6 +14,7 @@ marker = "truncate_search_aweme_items"
 post_id = "aweme_id"
 post_url = "aweme_url"
 title = "title"
+desc = "desc"
 keyword = "source_keyword"
 
 [comments]
@@ -25,6 +26,7 @@ user_hash = "creator_hash"
 created_at = "create_time"
 like_count = "like_count"
 parent_comment_id = "parent_comment_id"
+ip_province = "ip_province"     # 需要可选补丁 0005 才有这一列；没打补丁时列不存在，按空处理
 
 [monitor]
 keyword_re = 'Current keyword: (.+)$'

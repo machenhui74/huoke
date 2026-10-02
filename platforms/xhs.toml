@@ -16,6 +16,8 @@ marker = "truncate_search_note_items"
 post_id = "note_id"
 post_url = "note_url"
 title = "title"
+desc = "desc"                   # 地域过滤用：笔记描述（只取开头）
+tags = "tag_list"               # 地域过滤用：话题标签（用户自己打的 #台州，最可靠的本地信号）
 keyword = "source_keyword"
 
 [comments]                      # search_comments_*.csv
@@ -27,6 +29,7 @@ user_hash = "creator_hash"
 created_at = "create_time"
 like_count = "like_count"
 parent_comment_id = "parent_comment_id"
+ip_province = "ip_province"     # 需要可选补丁 0005 才有这一列；没打补丁时列不存在，按空处理
 
 # 运行时监控：从 MediaCrawler 的日志里数「每词实际拉取的笔记数」，超限立刻终止。
 # 正则已用 2026-09-30 的真实日志验证过。

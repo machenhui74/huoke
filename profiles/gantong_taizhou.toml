@@ -1,0 +1,827 @@
+# ============================================================
+# Profile：感统训练 · 台州（全市）家长需求
+# ------------------------------------------------------------
+# 派生自 education_taizhou.toml，差异只有三处：
+#   1. 品类本身就是感统：「感统/感觉统合」从 special（只进复核、禁 ready）里拿掉，
+#      否则这个品类永远出不了 ready（高相关）；注意力、多动等仍留在 special，涉及专业判断，只进复核。
+#   2. 感统相关词加入中意向词表，让品类词本身算教育意向。
+#   3. 地理从「椒江」放宽到台州全市：任何台州辖区地名都算本地。
+# 词表书写约定：长短语放前面，避免短词先抢走展示位；"@名字" 表示引用本段另一张词表。
+# ============================================================
+
+[meta]
+name = "gantong_taizhou"
+description = "感统训练 · 台州全市：家长在公开评论里的咨询/报名意向"
+timezone = "Asia/Shanghai"
+
+# ---------- 打分阈值与分值 ----------
+[scoring]
+high_base = 70            # 命中高意向词的基础分
+mid_base = 45             # 中意向
+low_base = 20             # 低意向
+weak_base = 15            # 一个词都没命中
+ready_threshold = 70      # >= 进 ready（仍需人工抽检后才能触达）
+review_threshold = 40     # >= 进 needs_review，更低进 low_archive
+non_parent_factor = 0.6   # 没有家长身份词时总分乘这个系数
+parent_bonus = 10
+loc_bonus = 8
+budget_bonus = 10
+urgent_bonus = 10
+consult_floor = 48        # 家长在「问」但分数低时，抬到这个分（仍低于 ready 线）
+buyer_floor = 42          # 在问价/问报名但没写家长词的，抬到这个分
+special_cap = 65          # 特殊需求（多动/注意力等）封顶分，只进复核
+# 明确咨询（问价 / 问怎么报怎么约 / 问几岁能上）直接抬到 ready 线，进高相关并标红。
+# 依据：感统/早教评论区里「多少一个月」「怎么预约」「几岁可以」就是最直接的意向表达（用户确认）。
+# 仍然要人工抽检后才能触达；机构口吻、投诉、特殊需求（多动/注意力）不会被抬。0 = 关闭。
+inquiry_ready_score = 70
+# 兜底：≤40 字、带疑问形态、又沾上品类词/台州地名/孩子年龄的评论，至少进待复核，宁可多看一眼也不直接丢掉。
+# 不带品类/地名/年龄的闲聊式提问不会被抬。0 = 关闭。
+question_floor = 42
+
+# ---------- 词表 ----------
+[words]
+high = [
+  "求避雷后的推荐", "有没有靠谱", "想给孩子报", "准备给娃报", "考虑报名",
+  "多少钱一节", "还有名额吗", "能试听吗", "怎么报名", "地址在哪",
+  "要不要报名", "什么价位", "有推荐吗", "求推荐", "求安利", "哪家好",
+  "求问", "想报", "准备报", "打算报", "有推荐",
+]
+mid = [
+  "感统训练", "感统失调", "感统课", "感统班", "感觉统合", "感统",
+  "哪家靠谱一点", "值得报吗", "幼小衔接", "作文辅导", "少儿编程", "数学思维",
+  "英语启蒙", "兴趣班", "托管班", "暑假班", "开学前", "这个月", "幼升小",
+  "幼儿园", "一年级", "托育", "托班", "纠结", "暑假", "马上", "下周",
+  "拼音", "钢琴", "编程", "补习", "择校",
+]
+low = ["了解一下", "先记着", "看看", "收藏", "好贵", "好卷", "没必要"]
+# 评论者本人像家长。不含裸「家长」：「面向家长 / 被家长」是课程或机构口吻。
+parent = [
+  "我家孩子", "我家小孩", "我家娃", "我家的", "小朋友", "大娃", "小娃",
+  "宝妈", "宝爸", "儿子", "女儿", "小孩", "宝宝", "女宝", "男宝", "娃",
+]
+budget = ["多少钱", "一节课", "学费", "包月", "价位", "收费", "价格"]
+# 在问价，不是在感叹贵。
+price_ask = [
+  # 感统/早教常见的按月、按节报价问法
+  "多少一个月", "多少一月", "多少一节", "多少一次", "一个月多少", "一月多少", "一节多少", "怎么包课",
+  "怎么收费", "怎么个收费", "多少钱", "什么价格", "多少价位", "什么价位", "多少价", "什么价", "收费吗"]
+# 「收费怎么也得150」这类吐槽含 price_ask 词，但不是在问价，命中下面任一词则不算问价。
+price_ask_exempt = ["怎么也得"]
+enroll_ask = [
+  "怎么报名", "能报名吗", "报名方式", "如何报名",
+  # 约课、体验课问法
+  "体验课怎么约", "体验课怎么", "怎么预约", "如何预约", "怎么约", "预约方式", "免费体验吗", "能体验吗", "可以体验吗", "怎么体验",
+  # 问别人报了哪家 / 在哪报名：是在找去处
+  "在哪报", "哪里报名", "报了哪里", "报了哪家", "报的哪家", "报的哪里",
+]
+# 问入门资格：几岁能上、多大孩子能上。说明在认真考虑让孩子去。
+age_ask = ["几岁可以", "几岁能", "多大孩子能上", "多大的孩子能", "多大能上", "多大可以", "多大可托"]
+# 以下几类也是明确咨询。全部写成「提问的完整说法」：商家的陈述句（如「联系电话见主页」「即日起对外开放」）
+# 不会命中；评论里直接贴了手机号的更是一律不抬（见 scoring.PHONE_RE）。
+# 问联系方式
+contact_ask = [
+  "有联系电话吗", "联系电话多少", "联系电话是多少", "联系电话呢", "电话多少", "电话是多少", "有电话吗", "有微信吗", "微信多少",
+  "有联系方式吗", "联系方式多少", "怎么联系", "怎么私信", "能私信吗", "可以私信吗",
+]
+# 问课程时间 / 营业 / 活动 / 名额 / 拼团
+detail_ask = [
+  "上多久", "上多长时间", "课多久", "一节多久", "每节多久", "多久一节", "一周几节", "一周几次", "每周几次",
+  "几点上课", "什么时候开课", "什么时候上课", "什么时候开始", "开课吗", "营业了吗", "营业吗", "营业时间", "开放吗", "对外开放吗",
+  "还有名额吗", "还有位置吗", "有名额吗", "要预约吗", "需要预约吗", "要提前预约", "有优惠吗", "有活动吗", "活动吗",
+  "怎么拼", "拼吗", "怎么团购", "有团购吗", "能退吗", "可以退吗",
+]
+# 问位置。有本地地名（台州各区县）就算明确咨询；没有地名只进复核
+loc_ask = ["在哪里", "在哪儿", "在哪嘞", "在哪", "怎么走", "在什么地方", "什么地方", "哪里可以", "哪里有", "哪里哪里"]
+# 「有吗 / 还有吗」太泛：必须同时有地名或品类词才算（「路桥有吗」「温岭有吗 3岁不到的宝宝」）
+avail_ask = ["有吗", "还有吗", "还有么"]
+# 「有……课吗」直接算（「有普通的感统课吗」）
+avail_patterns = ['有.{0,10}[课班馆园]吗']
+complaint = ["避雷", "投诉", "警告", "报警", "没报名了", "曝光"]
+# 「求避雷之后还在求推荐」不是投诉，留给「求推荐」。
+complaint_exempt = ["求避雷"]
+urgent = ["暑假前必须", "赶紧", "急"]
+loc = ["地铁站", "附近", "同城", "某区"]
+# 机构在回复家长，不是家长在问。命中后不做咨询抬分，也不判为家长。
+institution = ["暖到心坎", "懂我们的家长", "感谢家长", "祝愿宝贝", "感谢宝妈", "感谢宝爸"]
+# 孩子自称（正则）：「我是宝贝」写评论的是孩子本人，不是家长。
+self_child_patterns = ['我是(?:宝贝|宝宝|小孩)']
+# 命中后只进复核，分数封顶 special_cap。搜索词里出现也算。
+# 注意：感统/感觉统合已拿掉（它是本画像的品类词）；其余涉及专业判断的仍只进复核。
+special = ["注意力", "多动", "学障", "读写困难", "社交障碍"]
+# 咨询问句：必须带「吗 / 怎么办」，避免「合适的托班」被误抬。
+consult_q = ["几岁可以", "几岁能", "多大孩子能上", "多大能上", "多大可以", "多大可托", "合适吗", "适合吗", "可以吗", "行吗", "能上吗", "怎么办", "咋办", "正常吗", "有用吗", "有效吗", "有必要吗"]
+# 除 consult_q / price_ask / enroll_ask 之外，这些词也说明评论者在「问」。
+ask_extra = ["合适", "适合", "能上", "来学", "可以托", "能托"]
+
+# 硬排除：广告、引流、机构互推。每项 [词, 原因]，原因会写进 exclude_reason。
+exclude = [
+  ["私信领取", "广告/引流"], ["免费领资料", "广告/引流"], ["名额有限", "广告/引流"],
+  ["火热报名", "广告/引流"], ["课程顾问", "广告/引流"], ["欢迎咨询", "广告/引流"],
+  ["试听名额", "广告/引流"], ["私信我", "广告/引流"], ["加微信", "广告/引流"],
+  ["本机构", "广告/引流"], ["招生中", "广告/引流"], ["威信", "广告/引流"],
+  ["我司", "广告/引流"], ["vx", "广告/引流"],
+  ["同行交流", "机构互推"], ["招生老师", "机构互推"], ["我们机构也做", "机构互推"],
+  ["互推", "机构互推"], ["换量", "机构互推"],
+  ["招生活动", "机构合作"], ["赞助奖品", "机构合作"], ["联合您", "机构合作"],
+]
+
+# ---------- 年龄线索（教育类特有；不需要的行业把 enabled 设为 false） ----------
+[age]
+enabled = true
+young_max = 6                         # 该年龄及以下：写评论的不可能是孩子本人，视为家长在问
+young_ask_words = ["托", "合适", "适合"]   # 低龄 + (consult_q/问价/问报名/这些词) => 判家长
+older_range = [7, 16]                 # 大孩子：只有明确「来学/问句」才算买方在问
+older_learn_words = ["来学"]
+unknown_age_words = ["几个月", "多大", "几岁"]  # 在问年龄本身，按 0 岁记
+
+# ---------- 地理 ----------
+[geo]
+# 台州全市都算本地。原先区分 core/main 是为了突出椒江，这个画像不需要，统一放 core。
+# 刻意不放「天台」（常指屋顶天台）和「三门」（歧义大），避免误判；需要时再单独加。
+core = ["台州市", "台州", "椒江区", "椒江", "路桥", "黄岩", "临海", "温岭", "玉环", "仙居"]
+main = []
+city = []
+street = ["葭沚", "章安", "下陈", "洪家", "白云", "前所", "外沙", "三甲"]
+outcity = ["杭州", "宁波", "温州", "上海", "北京"]   # 明确外市：不给地理分
+street_false_positive = [["三甲", "三甲医院"]]
+bonus_core = 20
+bonus_main = 12
+bonus_city = 8
+bonus_street = 15
+bonus_cap = 20
+region_core = "台州"
+region_city = "台州"
+
+# ---------- 分层地域过滤（只留台州本地，外地没有意义）----------
+# 平台评论的 IP 属地只到省（台州人显示「浙江」），所以靠多层证据叠加：
+#   硬证据 评论正文有本地地名 / IP 属地=台州；软证据 IP=浙江、笔记标题/话题标签/描述含本地地名、昵称含本地地名；
+#   负证据 IP 非浙江、自述在外地（「我在深圳」）、笔记明确是外地内容。
+# 状态 → 动作：keep 不改判 / review 最高进待复核 / exclude 排除。设计与词表见 scripts/leadkit/geo.py。
+[geo_filter]
+enabled = true
+use_ip = true                  # 评论里有 IP 省级属地时使用（需要 setup --with-ip-province；没有就自动忽略）
+ip_local = ["台州"]            # IP 属地等于这些 = 硬证据（目前平台只到省，基本用不上，留给以后）
+ip_province = ["浙江"]         # IP 属地等于这些 = 软证据；其余非空值（外省/海外）= 负证据
+note_out_is_out = true         # 笔记标题/标签/描述里只有外市、没有台州 → 视为外地内容
+# 这些词单独出现太容易是别的意思（屋顶天台、三门峡…），必须同一段文字里还有语境词才算本地
+need_context = [
+  ["天台", ["台州", "天台县", "天台山", "国清寺", "始丰"]],
+  ["三门", ["台州", "三门县", "海游", "健跳", "蛇蟠"]],
+]
+# 命中本地词、但同时出现这些固定说法时，视为误命中
+false_positive = [["黄岩", "黄岩岛"], ["玉环", "杨玉环"], ["仙居", "神仙居"], ["路桥", "公路桥"], ["临海", "临海而"]]
+# 在 [geo].outcity 之外再追加的外地城市（用于识别自述外地和外地笔记）
+out_cities = ["深圳", "广州", "成都", "南京", "苏州", "金华", "义乌", "绍兴", "嘉兴", "湖州", "衢州", "丽水", "舟山",
+              "重庆", "武汉", "西安", "长沙", "郑州", "济南", "青岛", "福州", "厦门", "天津", "合肥", "无锡", "东莞", "佛山"]
+
+# 各地域状态的处理。没写的状态用默认：外地=排除、地名冲突=复核、其余保持。
+[geo_filter.actions]
+out_of_region = "exclude"
+conflict = "review"
+note_local = "keep"            # 只有「笔记含台州词」、评论本身没线索：保持原判（已确认的取舍），表里标「仅笔记本地」供抽检
+unknown = "keep"
+
+# 抖音评论几乎不带地名，泛科普视频下全是全国用户：笔记/视频和评论都没有任何台州线索的，直接排除
+# （只是不进池，库里仍留着；想放宽就把这里改成 "review" 或删掉）
+[geo_filter.actions_by_platform.dy]
+unknown = "exclude"
+
+# 最终 Excel 的可选第 10 列「地域把握」（放在最后，前 9 列不变）。不想要就改成 false。
+[export]
+xlsx_geo_column = true
+
+# ---------- 问题归类（按顺序匹配，第一个命中的生效） ----------
+# 规则字段：
+#   words   命中其中任一词即满足（"@名" 引用词表）
+#   any_of  内置谓词，任一为真即满足：complaint / price_ask / enroll_ask / age_known / parent
+#   all_of  内置谓词，必须全部为真
+# 满足条件 = (words 或 any_of 任一命中) 且 all_of 全真。
+[[problem_rules]]
+name = "求推荐"
+words = ["求推荐", "有推荐", "哪家好", "求安利", "靠谱", "求避雷后的推荐"]
+
+[[problem_rules]]
+name = "投诉避雷"
+any_of = ["complaint"]
+
+[[problem_rules]]
+name = "问价"
+any_of = ["price_ask"]
+
+[[problem_rules]]
+name = "纠结"
+words = ["纠结", "要不要报名"]
+
+[[problem_rules]]
+name = "报名"
+words = ["想报", "试听"]
+any_of = ["enroll_ask"]
+
+[[problem_rules]]
+name = "适龄咨询"
+words = ["合适", "适合", "可以", "行吗", "能上", "托"]
+all_of = ["age_known"]
+
+[[problem_rules]]
+name = "注意力行为"
+words = ["坐不住", "好动", "多动", "注意力", "专注"]
+
+[[problem_rules]]
+name = "感统"
+words = ["感统", "感觉统合"]
+
+[[problem_rules]]
+name = "问联系方式"
+words = ["@contact_ask"]
+
+[[problem_rules]]
+name = "问课程详情"
+words = ["@detail_ask"]
+
+[[problem_rules]]
+name = "问题咨询"
+words = ["@consult_q"]
+all_of = ["parent"]
+
+[[problem_rules]]
+name = "求位置"
+words = ["@loc_ask", "地址"]
+
+# 被「咨询抬分」抬进复核但没归到任何问题的，统一记成这个
+[problem_fallback]
+lifted = "问题咨询"
+
+# ---------- 触达场景 ----------
+# 触达话术按「场景」分类（见 references/outreach.md）。这些问题类型可以直接对应到话术场景，
+# 入库时自动填 scene；其余留空，由人工抽检时标注。
+[outreach]
+scene_from_problem = ["问价", "纠结", "求推荐"]
+
+# ---------- 关键词扩写 ----------
+[keywords]
+min = 10
+max = 18
+# 家长真正会打的需求后缀，不是广告文案
+demands = ["推荐", "价格", "怎么选", "报名", "哪家好", "多少钱"]
+# {p}=地区 {c}=品类
+primary = [
+  "{p}{c}", "{p}{c}推荐", "{p}{c}价格", "{p}{c}怎么选",
+  "{p}{c}报名", "{p}{c}哪家好", "{p}{c}多少钱", "{p}小孩{c}",
+]
+# 地区不在上面 [geo] 词表里时才用，保证一个输入也能出 10 条以上，且不编造行政区
+extras = [
+  "{p}{c}机构推荐", "{p}{c}靠谱吗", "{p}{c}怎么报名", "{p}附近{c}",
+  "{p}{c}收费", "{p}{c}有推荐吗", "{p}宝宝{c}", "{p}{c}哪家靠谱",
+]
+
+# ---------- 采集限额（防封号红线，见 references/safety-redlines.md） ----------
+# 这里只能「收紧」，不能超过代码里的硬上限；超过需要显式 --allow-exceed-limits 并留痕。
+[limits]
+max_keywords = 10             # 每次采集的关键词数（回退基线 3）
+max_notes_per_keyword = 5     # 每词笔记/视频数
+max_comments_per_note = 10    # 单帖一级评论数（回退基线 5）
+max_concurrency = 1
+min_sleep_sec = 3             # 请求间隔下限
+sessions_per_day = 2          # 每日采集次数
+cooldown_minutes = 30         # 两次之间冷却
+block_cooldown_hours = 2      # 遇到滑块/限流后冷却
+daily_note_details = 50       # 每日笔记详情估算上限（回退基线 30）
+daily_comments = 500          # 每日评论估算上限（回退基线 50）
+
+# ---------- 采集后端 ----------
+[collect]
+platform = "xhs"              # 默认平台；命令行 --platform 可覆盖
+login = "qrcode"
+retention_raw_days = 30       # 原始评论保留天数
+retention_excluded_days = 14  # 被排除/低分线索保留天数
+max_session_minutes = 120     # 单次会话总时长保险：超过就终止进程（防止卡死、无人发现）
+
+# 运行时覆盖上游 MediaCrawler 的 config（只允许白名单内的键，见 guard.py）
+[collect.overrides]
+CDP_CONNECT_EXISTING = false  # 用独立浏览器档案，不附着你正在用的 Chrome
+AUTO_CLOSE_BROWSER = true
+
+# 采集节奏：请求间隔不再是固定值，而是随机（对数正态分布，多数偏短、少数偏长），偶尔再追加一次长停顿。
+# 只会比 [limits].min_sleep_sec 更慢，不会更快，也不增加请求数量；整次会话因此被拉长（15 篇笔记约 10 分钟）。
+# 想更慢更稳：调大 median_factor / long_pause_prob。关闭（enabled=false）会退回固定间隔，不建议。
+[collect.pacing]
+enabled = true
+median_factor = 2.5           # 中位间隔 = 下限 × 该值（下限 3s → 约 7.5s）
+sigma = 0.5                   # 离散程度，越大越参差
+cap_factor = 5.0              # 常规间隔上限 = 下限 × 该值（→ 15s）
+long_pause_prob = 0.15        # 每次间隔后追加长停顿的概率
+long_pause_sec = [20, 60]     # 长停顿范围（秒）
+
+# ---------- 自检用例 ----------
+# 这些句子都是人工看过的结论。改词表后必须先通过，否则 rescore/ingest 拒绝入库。
+# 字段：text 评论, keyword 搜索词, status, parent(0/1), problem, strength
+#       可选 min_score / max_score 约束分数带
+[[cases]]
+text = "3周岁娃什么价位"
+keyword = "椒江托管班"
+status = "ready"
+parent = 1
+problem = "问价"
+strength = "高"
+min_score = 70
+
+[[cases]]
+text = "前两天去试听了这家的课，我家的说好玩的很，还在纠结要不要报名"
+keyword = "台州少儿编程"
+status = "ready"
+parent = 1
+problem = "纠结"
+strength = "高"
+
+[[cases]]
+text = "2岁的娃合适吗"
+keyword = "台州椒江感统训练"
+status = "needs_review"
+parent = 1
+problem = "适龄咨询"
+strength = "中"
+min_score = 40
+max_score = 65
+
+[[cases]]
+text = "8个月可以吗？"
+keyword = "椒江托管班"
+status = "needs_review"
+parent = 1
+problem = "适龄咨询"
+strength = "中"
+
+[[cases]]
+text = "2岁 什么价格 什么时间"
+keyword = "椒江托管班"
+status = "ready"
+parent = 1
+problem = "问价"
+strength = "高"
+min_score = 70
+
+[[cases]]
+text = "怎么收费"
+keyword = "椒江托管班"
+status = "ready"
+parent = 0
+problem = "问价"
+strength = "高"
+min_score = 70
+
+[[cases]]
+text = "三周岁能报名吗？"
+keyword = "椒江托管班"
+status = "ready"
+parent = 1
+problem = "报名"
+strength = "高"
+min_score = 70
+
+[[cases]]
+text = "多大可以托"
+keyword = "椒江托管班"
+status = "ready"
+parent = 1
+problem = "适龄咨询"
+strength = "高"
+min_score = 70
+
+[[cases]]
+text = "这一天收费怎么也得150"
+keyword = "椒江托管班"
+status = "low_archive"
+parent = 0
+problem = ""
+strength = "低"
+
+[[cases]]
+text = "我明白算命的为什么说我33岁难了，33岁小孩读小学了"
+keyword = "台州少儿编程"
+status = "low_archive"
+parent = 1
+problem = ""
+strength = "低"
+
+[[cases]]
+text = "这家避雷，没有名额所以别报名"
+keyword = "椒江托管班"
+status = "low_archive"
+parent = 0
+problem = "投诉避雷"
+strength = "低"
+
+[[cases]]
+text = "被家长的话暖到心坎里了，祝愿宝贝快乐成长"
+keyword = "台州椒江感统训练"
+status = "low_archive"
+parent = 0
+problem = ""
+strength = "低"
+
+[[cases]]
+text = "老师，想赞助奖品，联合您组织一场秋季招生活动，方便聊聊吗？"
+keyword = "椒江感统训练推荐"
+status = "excluded"
+parent = 0
+problem = ""
+strength = "无"
+
+[[cases]]
+text = "椒江哪里"
+keyword = "台州椒江感统训练"
+status = "needs_review"
+parent = 0
+problem = "问题咨询"
+strength = "中"
+
+[[cases]]
+text = "不错"
+keyword = "台州椒江感统训练"
+status = "low_archive"
+parent = 0
+problem = ""
+strength = "低"
+
+[[cases]]
+text = "我是宝贝"
+keyword = "台州椒江感统训练价格"
+status = "low_archive"
+parent = 0
+problem = ""
+strength = "低"
+
+[[cases]]
+text = "请问找到合适的托班了吗？有推荐吗"
+keyword = "椒江托管班"
+status = "needs_review"
+parent = 0
+problem = "求推荐"
+strength = "中"
+
+# ---------- 感统品类专属用例 ----------
+# 品类词「感统」不能再触发 special 封顶，否则这个品类永远没有 ready。
+[[cases]]
+text = "我家娃坐不住，想报感统训练，多少钱一节"
+keyword = "台州感统训练"
+status = "ready"
+parent = 1
+problem = "问价"
+strength = "高"
+min_score = 70
+
+[[cases]]
+text = "宝妈求推荐台州靠谱的感统训练"
+keyword = "台州感统训练推荐"
+status = "ready"
+parent = 1
+problem = "求推荐"
+strength = "高"
+
+[[cases]]
+text = "孩子4岁适合做感统训练吗"
+keyword = "台州感统训练"
+status = "needs_review"
+parent = 1
+problem = "适龄咨询"
+strength = "中"
+
+# 多动、注意力涉及专业判断，仍然只进复核，不会因为品类是感统就放开
+[[cases]]
+text = "我家娃多动，注意力不集中怎么办，想报个班，多少钱一节"
+keyword = "台州感统训练"
+status = "needs_review"
+parent = 1
+problem = "问价"
+strength = "中"
+max_score = 65
+
+# ---------- 明确咨询（用户确认：这些就是比较明显的意向客户）→ ready，标红 ----------
+[[cases]]
+text = "体验课怎么约"
+keyword = "台州感统训练"
+status = "ready"
+parent = 0
+problem = "报名"
+strength = "高"
+min_score = 70
+
+[[cases]]
+text = "怎么预约"
+keyword = "台州感统训练"
+status = "ready"
+parent = 0
+problem = "报名"
+strength = "高"
+min_score = 70
+
+[[cases]]
+text = "免费体验吗？"
+keyword = "台州感统训练"
+status = "ready"
+parent = 0
+problem = "报名"
+strength = "高"
+min_score = 70
+
+[[cases]]
+text = "多少一个月"
+keyword = "台州感统训练"
+status = "ready"
+parent = 1
+problem = "问价"
+strength = "高"
+min_score = 70
+
+[[cases]]
+text = "2-3岁的多少一节，怎么包课，有什么活动？有没有体育课"
+keyword = "台州感统训练"
+status = "ready"
+parent = 1
+problem = "问价"
+strength = "高"
+min_score = 70
+
+[[cases]]
+text = "几岁可以？"
+keyword = "台州感统训练"
+status = "ready"
+parent = 1
+problem = "适龄咨询"
+strength = "高"
+min_score = 70
+
+[[cases]]
+text = "多大孩子能上？"
+keyword = "台州感统训练"
+status = "ready"
+parent = 1
+problem = "适龄咨询"
+strength = "高"
+min_score = 70
+
+[[cases]]
+text = "在哪里，多少一个月"
+keyword = "台州感统训练"
+status = "ready"
+parent = 1
+problem = "问价"
+strength = "高"
+min_score = 70
+
+# ---------- 不该被抬的反例 ----------
+[[cases]]
+text = "在哪里"
+keyword = "台州感统训练"
+status = "needs_review"
+parent = 0
+problem = "求位置"
+strength = "中"
+
+[[cases]]
+text = "这家避雷，多少一个月"
+keyword = "台州感统训练"
+status = "low_archive"
+parent = 0
+problem = "投诉避雷"
+strength = "低"
+
+[[cases]]
+text = "我家娃多动，注意力不集中，多少一个月"
+keyword = "台州感统训练"
+status = "needs_review"
+parent = 1
+problem = "问价"
+strength = "中"
+max_score = 65
+
+[[cases]]
+text = "欢迎咨询，多少一个月，私信我"
+keyword = "台州感统训练"
+status = "excluded"
+parent = 0
+problem = ""
+strength = "无"
+
+[[cases]]
+text = "2岁不到可以吗"
+keyword = "台州感统训练"
+status = "needs_review"
+parent = 1
+problem = "适龄咨询"
+strength = "中"
+
+# ---------- 短咨询（来自真实评论里被漏掉的那批）→ ready ----------
+[[cases]]
+text = "有联系电话吗"
+keyword = "台州感统训练"
+status = "ready"
+parent = 0
+problem = "问联系方式"
+strength = "高"
+min_score = 70
+
+[[cases]]
+text = "台州的在哪里"
+keyword = "台州感统训练"
+status = "ready"
+parent = 0
+problem = "求位置"
+strength = "高"
+min_score = 70
+
+[[cases]]
+text = "暑假班上多久啊"
+keyword = "台州感统训练"
+status = "ready"
+parent = 0
+problem = "问课程详情"
+strength = "高"
+min_score = 70
+
+[[cases]]
+text = "路桥有吗"
+keyword = "台州感统训练"
+status = "ready"
+parent = 0
+problem = "问题咨询"
+strength = "高"
+min_score = 70
+
+[[cases]]
+text = "温岭有吗 3岁不到的宝宝[doge]"
+keyword = "台州感统训练"
+status = "ready"
+parent = 1
+problem = "问题咨询"
+strength = "高"
+min_score = 70
+
+[[cases]]
+text = "有普通的感统课吗"
+keyword = "台州感统训练"
+status = "ready"
+parent = 0
+problem = "感统"
+strength = "高"
+min_score = 70
+
+[[cases]]
+text = "吾悦有普通的体能课吗"
+keyword = "台州感统训练"
+status = "ready"
+parent = 0
+problem = "问题咨询"
+strength = "高"
+min_score = 70
+
+[[cases]]
+text = "中秋节这两天营业了吗？"
+keyword = "台州感统训练"
+status = "ready"
+parent = 0
+problem = "问课程详情"
+strength = "高"
+min_score = 70
+
+[[cases]]
+text = "现在还有这种活动吗"
+keyword = "台州感统训练"
+status = "ready"
+parent = 0
+problem = "问课程详情"
+strength = "高"
+min_score = 70
+
+[[cases]]
+text = "怎么拼"
+keyword = "台州感统训练"
+status = "ready"
+parent = 0
+problem = "问课程详情"
+strength = "高"
+min_score = 70
+
+[[cases]]
+text = "儿童乐园对外开放吗"
+keyword = "台州感统训练"
+status = "ready"
+parent = 0
+problem = "问课程详情"
+strength = "高"
+min_score = 70
+
+[[cases]]
+text = "你好 请问你最后报了哪里啊"
+keyword = "台州感统训练"
+status = "ready"
+parent = 0
+problem = "报名"
+strength = "高"
+min_score = 70
+
+# ---------- 兜底：进复核，不丢 ----------
+[[cases]]
+text = "在哪嘞"
+keyword = "台州感统训练"
+status = "needs_review"
+parent = 0
+problem = "求位置"
+strength = "中"
+
+[[cases]]
+text = "哪里哪里？"
+keyword = "台州感统训练"
+status = "needs_review"
+parent = 0
+problem = "求位置"
+strength = "中"
+
+[[cases]]
+text = "2岁宝宝能玩吗"
+keyword = "台州感统训练"
+status = "needs_review"
+parent = 1
+problem = "问题咨询"
+strength = "中"
+
+[[cases]]
+text = "2周女宝合适吗"
+keyword = "台州感统训练"
+status = "needs_review"
+parent = 1
+problem = "问题咨询"
+strength = "中"
+
+[[cases]]
+text = "四岁可以不"
+keyword = "台州感统训练"
+status = "needs_review"
+parent = 0
+problem = "适龄咨询"
+strength = "中"
+
+# ---------- 不能被抬的反例（商家陈述句、引流、闲聊、投诉）----------
+[[cases]]
+text = "联系电话13800138000，欢迎来玩"
+keyword = "台州感统训练"
+status = "low_archive"
+parent = 0
+problem = ""
+strength = "低"
+
+[[cases]]
+text = "联系电话：0576-88888888 台州在哪里"
+keyword = "台州感统训练"
+status = "low_archive"
+parent = 0
+problem = "求位置"
+strength = "低"
+
+[[cases]]
+text = "即日起对外开放"
+keyword = "台州感统训练"
+status = "low_archive"
+parent = 0
+problem = ""
+strength = "低"
+
+[[cases]]
+text = "联系电话见主页"
+keyword = "台州感统训练"
+status = "low_archive"
+parent = 0
+problem = ""
+strength = "低"
+
+[[cases]]
+text = "有吗"
+keyword = "台州感统训练"
+status = "low_archive"
+parent = 0
+problem = ""
+strength = "低"
+
+[[cases]]
+text = "星辉的园内环境也太棒了吧"
+keyword = "台州感统训练"
+status = "low_archive"
+parent = 0
+problem = ""
+strength = "低"
+
+[[cases]]
+text = "主要是给中小学生，那学习的是什么语言呢"
+keyword = "台州感统训练"
+status = "low_archive"
+parent = 0
+problem = ""
+strength = "低"
+
+[[cases]]
+text = "这家避雷，在哪里"
+keyword = "台州感统训练"
+status = "low_archive"
+parent = 0
+problem = "投诉避雷"
+strength = "低"

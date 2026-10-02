@@ -1,0 +1,13 @@
+diff --git a/store/douyin/__init__.py b/store/douyin/__init__.py
+--- a/store/douyin/__init__.py
++++ b/store/douyin/__init__.py
+@@ -140,7 +140,8 @@
+         "aweme_id": aweme_id,
+         "content": comment_item.get("text"),
+         "creator_hash": anonymize_user_id(user_info.get("uid")),  # 创作者匿名哈希(不存原始 uid)
+-        "nickname": mask_nickname(user_info.get("nickname")),  # 用户昵称(已脱敏)
++        # 需求表要评论人的完整用户名，不再中间打码（与 xhs 的 0003 补丁一致）；仍不存原始 uid。
++        "nickname": user_info.get("nickname") or "",
+         "sub_comment_count": str(comment_item.get("reply_comment_total", 0)),
+         "like_count": (comment_item.get("digg_count") if comment_item.get("digg_count") else 0),
+         "last_modify_ts": utils.get_current_timestamp(),

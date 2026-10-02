@@ -14,7 +14,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
-from .guard import Ledger
+from .guard import Ledger, check_patch
 from .logger import get_logger
 from .paths import PATCHES_DIR, PLATFORMS_DIR, Workspace
 from .profile import ProfileError, load_platform_map, load_profile
@@ -79,11 +79,19 @@ def sync_failure_hint(tail: str) -> str:
     return ""
 
 
-def patch_files(with_raw_identity: bool) -> list[Path]:
-    """默认只打防封号补丁；明文昵称/用户 ID 的补丁是可选的，需要显式开启。"""
+# 可选补丁按用途分组：0003/0004 = 明文昵称和用户 ID；0005 = 评论者 IP 省级属地（地域过滤用）。两组互相独立
+IP_PATCH_PREFIX = "0005"
+
+
+def patch_files(with_raw_identity: bool, with_ip_province: bool = False) -> list[Path]:
+    """默认只打防封号补丁；明文昵称/用户 ID、IP 省级属地的补丁是可选的，需要显式开启。"""
     files = sorted(PATCHES_DIR.glob("*.patch"))
-    if with_raw_identity:
-        files += sorted((PATCHES_DIR / "optional").glob("*.patch"))
+    for p in sorted((PATCHES_DIR / "optional").glob("*.patch")):
+        if p.name.startswith(IP_PATCH_PREFIX):
+            if with_ip_province:
+                files.append(p)
+        elif with_raw_identity:
+            files.append(p)
     return files
 
 
@@ -92,10 +100,10 @@ def patch_files(with_raw_identity: bool) -> list[Path]:
 _APPLY = ["git", "apply", "--ignore-whitespace"]
 
 
-def apply_patches(mc_dir: Path, with_raw_identity: bool = False) -> list[tuple[str, str]]:
+def apply_patches(mc_dir: Path, with_raw_identity: bool = False, with_ip_province: bool = False) -> list[tuple[str, str]]:
     """幂等地打补丁。返回 [(补丁名, applied|already|failed:原因)]。"""
     results = []
-    for p in patch_files(with_raw_identity):
+    for p in patch_files(with_raw_identity, with_ip_province):
         if _run(_APPLY + ["--check", "--reverse", str(p)], mc_dir).returncode == 0:
             LOG.info("补丁已存在，跳过 %s", p.name)
             results.append((p.name, "already"))
@@ -112,7 +120,7 @@ def apply_patches(mc_dir: Path, with_raw_identity: bool = False) -> list[tuple[s
 
 
 def setup(ws: Workspace, ref: str = PINNED_REF, mc_dir: Path | None = None, skip_sync: bool = False,
-          with_raw_identity: bool = False) -> int:
+          with_raw_identity: bool = False, with_ip_province: bool = False) -> int:
     """安装流程。返回进程退出码（0 成功）。"""
     ws.ensure()
     target = mc_dir or ws.vendor
@@ -148,7 +156,7 @@ def setup(ws: Workspace, ref: str = PINNED_REF, mc_dir: Path | None = None, skip
         LOG.error("%s 不像 MediaCrawler 目录（没有 main.py）", target)
         return 2
 
-    results = apply_patches(target, with_raw_identity)
+    results = apply_patches(target, with_raw_identity, with_ip_province)
     failed = [n for n, s in results if s.startswith("failed")]
     if failed:
         LOG.error("补丁失败：%s。上游版本可能不匹配，试试 --ref %s", failed, PINNED_REF)
@@ -196,7 +204,7 @@ def doctor(ws: Workspace, profile_name: str, mc_dir: Path | None = None) -> list
         add(f"profile {prof.name}", True, f"{prof.path.name}")
         add("profile 自检用例", not bad, f"{len(prof.data.get('cases', []))} 条，失败 {len(bad)}", "改词表后用例未通过：运行 leadctl check 看详情")
         use = Ledger(ws.state, prof.tz).usage_today()
-        add("今日采集用量", True, f"{use['sessions']} 次 / {use['notes']} 篇 / {use['comments']} 条评论", required=False)
+        add("今日采集用量（各平台合计；额度按平台分别计算）", True, f"{use['sessions']} 次 / {use['notes']} 篇 / {use['comments']} 条评论", required=False)
     except ProfileError as exc:
         add(f"profile {profile_name}", False, str(exc), "leadctl profiles 查看可用 profile；时区报错时 pip install tzdata")
 
@@ -209,7 +217,9 @@ def doctor(ws: Workspace, profile_name: str, mc_dir: Path | None = None) -> list
             patch = pm.get("patch")
             if not patch:
                 continue
-            f = mc / patch["file"]
-            ok = f.exists() and patch["marker"] in f.read_text(encoding="utf-8", errors="ignore")
-            add(f"{pm['platform']['label']}搜索截断补丁", ok, patch["marker"], "运行 leadctl setup 重新打补丁", required=False)
+            # 与采集预检共用 check_patch：它会同时检查 help.py 里的函数和 core.py 里的调用，
+            # 只看一个文件的话，补丁没接上时 doctor 仍显示通过，会误导人。
+            problems = check_patch(mc, pm)
+            add(f"{pm['platform']['label']}搜索截断补丁", not problems, patch["marker"] if not problems else problems[0],
+                "运行 leadctl setup 重新打补丁", required=False)
     return checks

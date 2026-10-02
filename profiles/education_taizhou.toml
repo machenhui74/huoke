@@ -189,16 +189,16 @@ extras = [
 # ---------- 采集限额（防封号红线，见 references/safety-redlines.md） ----------
 # 这里只能「收紧」，不能超过代码里的硬上限；超过需要显式 --allow-exceed-limits 并留痕。
 [limits]
-max_keywords = 3              # 每次采集的关键词数
+max_keywords = 10             # 每次采集的关键词数（回退基线 3）
 max_notes_per_keyword = 5     # 每词笔记/视频数
-max_comments_per_note = 5     # 单帖一级评论数
+max_comments_per_note = 10    # 单帖一级评论数（回退基线 5）
 max_concurrency = 1
 min_sleep_sec = 3             # 请求间隔下限
 sessions_per_day = 2          # 每日采集次数
 cooldown_minutes = 30         # 两次之间冷却
 block_cooldown_hours = 2      # 遇到滑块/限流后冷却
-daily_note_details = 30       # 每日笔记详情估算上限
-daily_comments = 50           # 每日评论估算上限
+daily_note_details = 50       # 每日笔记详情估算上限（回退基线 30）
+daily_comments = 500          # 每日评论估算上限（回退基线 50）
 
 # ---------- 采集后端 ----------
 [collect]
@@ -206,11 +206,23 @@ platform = "xhs"              # 默认平台；命令行 --platform 可覆盖
 login = "qrcode"
 retention_raw_days = 30       # 原始评论保留天数
 retention_excluded_days = 14  # 被排除/低分线索保留天数
+max_session_minutes = 120     # 单次会话总时长保险：超过就终止进程（防止卡死、无人发现）
 
 # 运行时覆盖上游 MediaCrawler 的 config（只允许白名单内的键，见 guard.py）
 [collect.overrides]
 CDP_CONNECT_EXISTING = false  # 用独立浏览器档案，不附着你正在用的 Chrome
 AUTO_CLOSE_BROWSER = true
+
+# 采集节奏：请求间隔不再是固定值，而是随机（对数正态分布，多数偏短、少数偏长），偶尔再追加一次长停顿。
+# 只会比 [limits].min_sleep_sec 更慢，不会更快，也不增加请求数量；整次会话因此被拉长（15 篇笔记约 10 分钟）。
+# 想更慢更稳：调大 median_factor / long_pause_prob。关闭（enabled=false）会退回固定间隔，不建议。
+[collect.pacing]
+enabled = true
+median_factor = 2.5           # 中位间隔 = 下限 × 该值（下限 3s → 约 7.5s）
+sigma = 0.5                   # 离散程度，越大越参差
+cap_factor = 5.0              # 常规间隔上限 = 下限 × 该值（→ 15s）
+long_pause_prob = 0.15        # 每次间隔后追加长停顿的概率
+long_pause_sec = [20, 60]     # 长停顿范围（秒）
 
 # ---------- 自检用例 ----------
 # 这些句子都是人工看过的结论。改词表后必须先通过，否则 rescore/ingest 拒绝入库。

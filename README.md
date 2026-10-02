@@ -50,17 +50,32 @@ python scripts/leadctl.py score --input examples/sample_comments.csv --text-col 
 # ① 品类 + 地区 → 搜索词清单（10~18 条，写入 ~/.leadkit/keywords/）
 python scripts/leadctl.py keywords --category 托管班 --place 台州椒江
 
-# ② 你从清单里挑 ≤3 条，先预检（不会真的访问平台）
-python scripts/leadctl.py collect --platform xhs --keywords "椒江托管班,椒江幼小衔接,台州少儿编程"
+# ①' 推荐：把词存进待采队列（--add 可加你自己想到的词，排在最前面；附近区的备选词不会入队）
+python scripts/leadctl.py keywords --category 托管班 --place 台州椒江 --add "椒江托管班哪家靠谱" --enqueue
+
+# ② 先预检（不会真的访问平台）：自动从队列取下一批（≤10 个词，配额不够就少取），并显示节奏和预计时长
+python scripts/leadctl.py collect --platform xhs --next
 
 # ③ 预检通过后，真正采集并自动入库（会弹出浏览器，用手机 App 扫码登录）
-python scripts/leadctl.py collect --platform xhs --keywords "椒江托管班,椒江幼小衔接,台州少儿编程" --yes --ingest
+python scripts/leadctl.py collect --platform xhs --next --yes --ingest
 
-# ④ 看结果
+# ④ 看结果；队列里还有词的话，隔天（或至少 30 分钟后）重复 ②③
 python scripts/leadctl.py pool stats
+python scripts/leadctl.py queue list
 ```
 
-人工池在 `~/.leadkit/exports/<profile>_pool.csv`，用 Excel 打开即可。
+单次最多 10 个词、每天最多 2 次会话、每天总量有上限，所以词多的时候要**分批、分天**采完。队列替你记着「采到哪了」：采成功的词标为已采，失败或被风控打断的词留在队列里下次再来。
+
+不想用队列，也可以手动指定（最多 10 个）：`collect --platform xhs --keywords "词1,词2,词3" --yes`。
+
+**采集节奏**：请求间隔不是固定 3 秒，而是随机的（中位约 7.5 秒、最长 15 秒），约每 7 次间隔后还会插入一次 20~60 秒的长停顿，一次会话大约 10 分钟。这只会让节奏更慢，不会增加请求数；预检时会显示预计时长。可在 profile 的 `[collect.pacing]` 调整。
+
+人工池在 `~/.leadkit/exports/<profile>_pool.xlsx`（同目录还有同内容的 `.csv`）。**高相关（`ready`）排在最前、整行标红**，其后是待复核，层内按意向分从高到低。想让待复核也标红，在画像里加：
+
+```toml
+[export]
+highlight_status = ["ready", "needs_review"]
+```
 
 > 第 ③ 步需要人在电脑前扫码并看着。出现滑块或验证码时**直接关掉**，工具会自动终止并冷却，不要尝试手动重试或绕过。
 
@@ -76,8 +91,9 @@ python scripts/leadctl.py pool stats
 | `setup` | 安装 MediaCrawler 并打补丁 | 只访问 GitHub |
 | `profiles` | 列出可用的行业/地区配置 | 否 |
 | `check` | 跑配置里的自检用例（改词表后必跑） | 否 |
-| `keywords --category X --place Y` | 扩写搜索词清单 | 否 |
-| `collect --platform P --keywords "a,b,c"` | 受限采集；**不加 `--yes` 只做预检** | 加 `--yes` 才会 |
+| `keywords --category X --place Y [--add "词,词"] [--enqueue]` | 扩写搜索词清单；`--add` 补自己的词，`--enqueue` 存入待采队列 | 否 |
+| `queue add\|list\|skip\|retry` | 管理待采队列（`add --words "a,b"` 或 `--from-proposal 清单文件`） | 否 |
+| `collect --platform P --keywords "a,b,c"` 或 `--next` | 受限采集；`--next` 从队列取词；**不加 `--yes` 只做预检** | 加 `--yes` 才会 |
 | `ingest --input 批次/目录/CSV` | 打分 → 入库 → 导出 | 否 |
 | `score --input a.csv --text-col 列名` | 给任意 CSV 打分，不入库 | 否 |
 | `pool rescore` | 改了规则后，对库里所有线索重打分 | 否 |
@@ -91,7 +107,8 @@ python scripts/leadctl.py pool stats
 | 参数 | 说明 |
 |---|---|
 | `--platform` | `xhs` 小红书、`dy` 抖音（已实测）；`ks` `bili` `wb`（未实测，需额外放行） |
-| `--keywords` | 逗号分隔，最多 3 个 |
+| `--keywords` | 逗号分隔，最多 10 个 |
+| `--next` | 从待采队列取下一批词（与 `--keywords` 二选一）。按今日剩余配额决定取几个，最多 10 个 |
 | `--notes` / `--comments` | 每词笔记数 / 单帖评论数。不写则自动取安全值（评论数按当日剩余配额反推） |
 | `--yes` | 确认执行。不加就是预检 |
 | `--ingest` | 采集成功后自动入库打分 |
@@ -140,13 +157,13 @@ python scripts/leadctl.py pool stats
 
 | 项目 | 限制 |
 |---|---|
-| 每次关键词数 | ≤ 3 |
-| 每词笔记数 / 单帖评论数 | ≤ 5 / ≤ 5（默认按当日剩余配额自动取，通常每帖 3 条） |
+| 每次关键词数 | ≤ 10 |
+| 每词笔记数 / 单帖评论数 | ≤ 5 / ≤ 10（评论数默认按当日剩余配额自动取；满额即 10 词 × 5 篇 × 10 条 = 50 篇 / 500 条） |
 | 并发 / 请求间隔 | 1 / ≥ 3 秒 |
 | 二级评论、代理、媒体下载 | 必须关闭，没有放宽的口子 |
 | 登录方式 | 只允许扫码（手机验证码登录会触发上游的"自动过滑块"，属于绕过风控） |
 | 每日采集次数 / 间隔 | ≤ 2 次 / 间隔 ≥ 30 分钟 |
-| 每日估算用量 | 笔记详情 ≤ 30，评论 ≤ 50 |
+| 每日估算用量 | 笔记详情 ≤ 50，评论 ≤ 500 |
 | 上游补丁 | 必须已生效，否则拒绝（见下） |
 
 **为什么要补丁**：上游 MediaCrawler 会把"每词笔记数"强行抬到整页大小（小红书 20、抖音 10）。配置写 5，实际会拉 20。补丁修掉这个行为；每次采集前还会检查补丁是否在。
@@ -208,7 +225,7 @@ ln -s "$(pwd)" ~/.cursor/skills/lead-intake
 
 | 现象 | 原因与处理 |
 |---|---|
-| `拒绝执行：关键词数=4 超过上限 3` | 一次最多 3 个词，分日采 |
+| `拒绝执行：关键词数=11 超过上限 10` | 一次最多 10 个词，其余入队分批采 |
 | `拒绝执行：今日评论已用 X，再采 Y 会超过 50` | 当日配额不够。减少 `--comments`，或明天再采 |
 | `距上次采集不足 30 分钟` | 冷却中，等一等。别绕过 |
 | `搜索截断补丁未生效` | 运行 `setup` 重新打补丁；若报补丁打不上，说明上游版本不匹配，`setup --ref 380b426` |
@@ -258,7 +275,9 @@ lead-intake/
 
 **加一个采集后端**：在 `collectors/` 里继承 `Collector`，实现 `preflight / describe / run`，在 `collectors/__init__.py` 的 `BACKENDS` 登记。参数护栏对所有后端统一生效，后端里不要自己放宽。
 
-**可选补丁 `0003`**：让 MediaCrawler 的小红书输出明文昵称和用户 ID（上游默认是脱敏的）。涉及个人信息，默认不打，需要 `setup --with-raw-identity` 显式开启。
+**可选补丁 `0003` / `0004`**：让 MediaCrawler 输出明文昵称（上游默认是中间打码的，如 `小*`）。`0003` 管小红书（同时存用户 ID），`0004` 管抖音评论（**只放开昵称**，不存原始 uid）。涉及个人信息，默认不打，需要 `setup --with-raw-identity` 显式开启；最终表格要显示完整用户名就必须开。已采过的旧数据不会回填，需要重新采集。
+
+**可选补丁 `0005` + 分层地域过滤**：平台评论的 IP 属地只到省（台州人显示「浙江」），任何单一信号都分不出台州。`setup --with-ip-province` 打上 `0005` 后，评论 CSV 多一列 `ip_province`（只存省级文字，不存其他个人信息）；profile 的 `[geo_filter]` 把评论正文地名、笔记标题/话题标签、昵称、IP 省级、自述外地叠加成地域状态，再按配置保持 / 封顶复核 / 排除。默认关闭；没有 IP 列也能用（只靠文本信号）。旧线索重新 `ingest` 同一批原始数据即可补上笔记上下文。
 
 **测试**：`python -m unittest discover -s tests`。覆盖打分回归、护栏限额、台账配额、运行时监控（含误报防护）、入库幂等、导出脱敏。
 

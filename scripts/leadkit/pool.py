@@ -3,7 +3,7 @@
 设计要点：
 - 入库和重打分共用同一套更新逻辑，保证「新进来的」和「改规则后重算的」判断一致；
 - 已被人点过头的线索（reach_status 在 LOCKED_REACH 里）分数和触达状态保持原样，只补三列判断；
-- 导出分两份：exports/ 下的不含昵称，可外传；internal/ 下的含昵称，仅内部对照；
+- 导出分两份：exports/ 下的不含昵称，可外传；internal/ 下的含昵称，仅内部对照；另有一份 Excel（internal/，含用户名，高相关行标红、排在最前、笔记链接可点）；
 - 任何导出都做一遍「禁止列」自检，泄露就中止。
 """
 from __future__ import annotations
@@ -16,6 +16,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from . import xlsx
+from .geo import GEO_LABEL
 from .logger import get_logger
 from .paths import Workspace
 from .profile import Profile
@@ -48,7 +50,8 @@ def connect(db_path: Path) -> sqlite3.Connection:
     con.row_factory = sqlite3.Row
     con.executescript(SCHEMA.read_text(encoding="utf-8"))
     have = {r[1] for r in con.execute("PRAGMA table_info(leads)")}
-    for name, ddl in {"parent_likely": "INTEGER NOT NULL DEFAULT 0", "problem": "TEXT", "strength": "TEXT"}.items():
+    for name, ddl in {"parent_likely": "INTEGER NOT NULL DEFAULT 0", "problem": "TEXT", "strength": "TEXT",
+                      "geo_state": "TEXT", "geo_signals": "TEXT", "ip_province": "TEXT", "note_context": "TEXT"}.items():
         if name not in have:
             con.execute(f"ALTER TABLE leads ADD COLUMN {name} {ddl}")
             LOG.info("leads 补列 %s", name)
@@ -87,8 +90,10 @@ def _update_scored(con: sqlite3.Connection, profile: Profile, row: sqlite3.Row, 
     status, reason = pool_status(scored)
     if row["reach_status"] in LOCKED_REACH:
         con.execute(
-            "UPDATE leads SET parent_likely=?, problem=?, strength=?, updated_at=? WHERE platform=? AND comment_id=?",
-            (scored["parent_likely"], scored["problem"] or None, scored["strength"], now, row["platform"], row["comment_id"]),
+            "UPDATE leads SET parent_likely=?, problem=?, strength=?, geo_state=?, geo_signals=?, updated_at=? "
+            "WHERE platform=? AND comment_id=?",
+            (scored["parent_likely"], scored["problem"] or None, scored["strength"], scored["geo_state"] or None,
+             scored["geo_signals"] or None, now, row["platform"], row["comment_id"]),
         )
         LOG.info("已触达冻结 %s %s，只补判断列", row["platform"], row["comment_id"])
         return "locked"
@@ -103,17 +108,21 @@ def _update_scored(con: sqlite3.Connection, profile: Profile, row: sqlite3.Row, 
         note = "进人工池，不自动触达"
     changed = (status != row["status"] or int(scored["intent_score"]) != int(row["intent_score"])
                or (scored["problem"] or "") != (row["problem"] or ""))
+    if scored["geo_state"] != (row["geo_state"] or ""):
+        LOG.info("地域状态 %s %s %s→%s [%s]", row["platform"], row["comment_id"], row["geo_state"] or "-",
+                 scored["geo_state"] or "-", scored["geo_signals"])
     if changed:
         LOG.info("改判 %s %s %s→%s 分 %s→%s problem=%s", row["platform"], row["comment_id"], row["status"],
                  status, row["intent_score"], scored["intent_score"], scored["problem"])
     con.execute(
         """UPDATE leads SET intent_score=?, tags=?, status=?, exclude_reason=?, geo_hit=?, target_region=?,
              geo_evidence=?, parent_likely=?, problem=?, strength=?, scene=?, reach_status=?, review_note=?,
-             scored_at=?, updated_at=? WHERE platform=? AND comment_id=?""",
+             geo_state=?, geo_signals=?, scored_at=?, updated_at=? WHERE platform=? AND comment_id=?""",
         (int(scored["intent_score"]), scored["tags"], status, reason or None, 1 if scored["geo_hit"] else 0,
          scored["target_region"] or None, scored["geo_evidence"] or None, scored["parent_likely"],
          scored["problem"] or None, scored["strength"], _scene(profile, scored["problem"], row["scene"]),
-         reach, note, now, now, row["platform"], row["comment_id"]),
+         reach, note, scored["geo_state"] or None, scored["geo_signals"] or None, now, now,
+         row["platform"], row["comment_id"]),
     )
     return "changed" if changed else "same"
 
@@ -128,7 +137,10 @@ def ingest(con: sqlite3.Connection, profile: Profile, scorer: Scorer, records: l
     try:
         con.execute("BEGIN")
         for r in records:
-            scored = scorer.score(r["text"], r["search_keyword"])
+            note_ctx = r.get("note_text", "") or ""
+            ip_prov = r.get("ip_province", "") or ""
+            scored = scorer.score(r["text"], r["search_keyword"], {
+                "nickname": r["nickname"], "note_text": note_ctx, "ip_province": ip_prov, "platform": r["platform"]})
             status, reason = pool_status(scored)
             con.execute(
                 """INSERT INTO raw_comments (id, platform, comment_id, note_id, content, nickname, creator_hash,
@@ -146,6 +158,10 @@ def ingest(con: sqlite3.Connection, profile: Profile, scorer: Scorer, records: l
                                    (r["platform"], r["comment_id"])).fetchone()
             if existing:
                 outcome = _update_scored(con, profile, existing, scored, now)
+                if note_ctx or ip_prov:  # 重新入库时补上旧数据缺的上下文；空值不覆盖已有的
+                    con.execute("UPDATE leads SET note_context=COALESCE(NULLIF(?, ''), note_context), "
+                                "ip_province=COALESCE(NULLIF(?, ''), ip_province) WHERE platform=? AND comment_id=?",
+                                (note_ctx, ip_prov, r["platform"], r["comment_id"]))
                 counts["locked" if outcome == "locked" else "updated"] += 1
             else:
                 reach = "pending_review" if status == "ready" else "none"
@@ -153,14 +169,16 @@ def ingest(con: sqlite3.Connection, profile: Profile, scorer: Scorer, records: l
                     """INSERT INTO leads (id, platform, comment_id, note_id, comment_text, post_url, nickname,
                          creator_hash, commented_at, search_keyword, intent_score, tags, parent_likely, problem,
                          strength, status, exclude_reason, geo_hit, target_region, geo_evidence, scene,
-                         reach_status, scored_at, created_at, updated_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                         reach_status, scored_at, created_at, updated_at,
+                         geo_state, geo_signals, ip_province, note_context)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (str(uuid.uuid4()), r["platform"], r["comment_id"], r["post_id"], r["text"], r["post_url"],
                      r["nickname"], r["user_hash"] or None, r["created_at"], r["search_keyword"],
                      int(scored["intent_score"]), scored["tags"], scored["parent_likely"], scored["problem"] or None,
                      scored["strength"], status, reason or None, 1 if scored["geo_hit"] else 0,
                      scored["target_region"] or None, scored["geo_evidence"] or None,
-                     _scene(profile, scored["problem"], None), reach, now, now, now),
+                     _scene(profile, scored["problem"], None), reach, now, now, now,
+                     scored["geo_state"] or None, scored["geo_signals"] or None, ip_prov or None, note_ctx or None),
                 )
                 counts["new"] += 1
             counts[status] += 1
@@ -184,7 +202,9 @@ def rescore(con: sqlite3.Connection, profile: Profile, scorer: Scorer, db_path: 
         rows = list(con.execute("SELECT * FROM leads"))
         LOG.info("重打分 %d 条线索", len(rows))
         for row in rows:
-            scored = scorer.score(row["comment_text"] or "", row["search_keyword"] or "")
+            scored = scorer.score(row["comment_text"] or "", row["search_keyword"] or "", {
+                "nickname": row["nickname"] or "", "note_text": row["note_context"] or "",
+                "ip_province": row["ip_province"] or "", "platform": row["platform"]})
             outcome = _update_scored(con, profile, row, scored, now)
             counts["total"] += 1
             if outcome in counts:
@@ -206,16 +226,71 @@ def _check_header(path: Path) -> None:
         raise SystemExit(f"导出泄露了禁止列 {leaked}，已删除 {path}")
 
 
+# Excel 表的列：(字段, 表头, 列宽, 数字列?, 链接列?)。顺序和表头是用户指定的最终交付格式，
+# 不要随意增删列——要加字段先问用户。用户名是原样输出，不做隐藏。
+XLSX_COLUMNS: list[tuple[str, str, float, bool, bool]] = [
+    ("intent_score", "意向分", 8, True, False), ("problem", "问题类型", 12, False, False),
+    ("post_title", "原帖标题", 34, False, False), ("comment_text", "评论内容", 56, False, False),
+    ("commented_at", "评论时间", 19, False, False), ("nickname", "用户名", 16, False, False),
+    ("search_keyword", "搜索词", 16, False, False), ("post_url", "笔记链接", 40, False, True),
+    ("platform", "平台", 8, False, False),
+]
+# 可选的第 10 列：地域把握。由 profile 的 [export] xlsx_geo_column 打开，放在最后，前 9 列保持原样
+XLSX_GEO_COLUMN = ("geo_label", "地域把握", 12, False, False)
+DEFAULT_HIGHLIGHT = ("ready",)  # 默认只有 ready（高意向）标红；profile 的 [export] highlight_status 可改
+# 平台代号 → 表里显示的名字（未知代号原样显示）
+PLATFORM_LABEL = {"xhs": "小红书", "dy": "抖音", "douyin": "抖音"}
+
+
+def _xlsx_value(field: str, value: Any) -> Any:
+    """评论时间去掉时区后缀（+0800）更好读；平台代号换成中文名。"""
+    if field == "commented_at":
+        return (value or "")[:19]
+    if field == "platform":
+        return PLATFORM_LABEL.get(value, value)
+    return value
+
+
+def _write_xlsx(path: Path, rows: list[sqlite3.Row], red: frozenset[int], with_geo: bool = False) -> None:
+    """写最终交付的 Excel：含用户名，因此只放 internal/，不进 exports/。"""
+    cols = XLSX_COLUMNS + ([XLSX_GEO_COLUMN] if with_geo else [])
+
+    def cell(r: sqlite3.Row, field: str) -> Any:
+        if field == "geo_label":
+            return GEO_LABEL.get(r["geo_state"] or "", "")
+        return _xlsx_value(field, r[field])
+
+    xlsx.write_xlsx(
+        path, [h for _, h, *_ in cols],
+        [[cell(r, f) for f, *_ in cols] for r in rows],
+        red_rows=red, widths=[w for _, _, w, *_ in cols],
+        number_cols={i for i, c in enumerate(cols) if c[3]},
+        link_cols={i for i, c in enumerate(cols) if c[4]})
+
+
 def export(con: sqlite3.Connection, ws: Workspace, profile: Profile,
            statuses: tuple[str, ...] = ("ready", "needs_review")) -> tuple[Path, Path, int]:
-    """导出人工池。返回 (脱敏文件, 内部对照文件, 行数)。"""
+    """导出人工池。返回 (脱敏 CSV, 内部对照 CSV, 行数)。
+
+    另有最终交付的 Excel：internal/<profile>_pool.xlsx（含用户名、笔记链接可点击、高相关行标红）。
+    排序：先按状态分层（ready 在前、needs_review 其次），层内按意向分从高到低。
+    不能只按分数排——否则某条 needs_review 分数偏高时会插到 ready 前面，「高相关排在最前」就不成立了。
+    标红：状态在 highlight_status（默认 ready）里的整行，Excel 里浅红底 + 深红字，CSV 无颜色。
+    """
     ws.exports.mkdir(parents=True, exist_ok=True)
     ws.internal.mkdir(parents=True, exist_ok=True)
     marks = ",".join("?" for _ in statuses)
+    # 原帖标题只存在 raw_comments 里；原始评论过期被清理后拿不到，用 LEFT JOIN 退化成空而不是丢线索
     rows = list(con.execute(
-        f"""SELECT platform, comment_id, note_id AS post_id, comment_text, post_url, search_keyword, intent_score,
-               parent_likely, problem, strength, tags, status, geo_hit, target_region, reach_status, nickname
-            FROM leads WHERE status IN ({marks}) ORDER BY intent_score DESC, platform""", statuses))
+        f"""SELECT l.platform, l.comment_id, l.note_id AS post_id, l.comment_text, l.post_url, l.search_keyword,
+               l.intent_score, l.parent_likely, l.problem, l.strength, l.tags, l.status, l.geo_hit, l.target_region,
+               l.reach_status, l.nickname, l.commented_at, l.geo_state, COALESCE(r.note_title, '') AS post_title
+            FROM leads l LEFT JOIN raw_comments r ON r.platform = l.platform AND r.comment_id = l.comment_id
+            WHERE l.status IN ({marks})
+            ORDER BY CASE l.status WHEN 'ready' THEN 0 WHEN 'needs_review' THEN 1 ELSE 2 END,
+                     l.intent_score DESC, l.platform, l.comment_id""", statuses))
+    highlight = set(profile.section("export").get("highlight_status", DEFAULT_HIGHLIGHT))
+    red = frozenset(i for i, r in enumerate(rows) if r["status"] in highlight)
     public = ws.exports / f"{profile.name}_pool.csv"
     internal = ws.internal / f"{profile.name}_pool_with_nickname.csv"
     with public.open("w", newline="", encoding="utf-8-sig") as f:
@@ -229,8 +304,15 @@ def export(con: sqlite3.Connection, ws: Workspace, profile: Profile,
         w.writeheader()
         for r in rows:
             w.writerow({k: r[k] for k in PUBLIC_FIELDS + ["nickname"]})
-    LOG.info("导出 %d 条：%s（脱敏）/ %s（含昵称，仅内部）", len(rows), public, internal)
+    _write_xlsx(xlsx_path(ws, profile), rows, red, bool(profile.section("export").get("xlsx_geo_column", False)))
+    LOG.info("导出 %d 条（标红 %d）：Excel %s；CSV %s（脱敏）/ %s（含昵称）", len(rows), len(red),
+             xlsx_path(ws, profile), public, internal)
     return public, internal, len(rows)
+
+
+def xlsx_path(ws: Workspace, profile: Profile) -> Path:
+    """最终交付 Excel 的位置（含用户名，所以放 internal/）。CLI 和测试都用这个函数找文件。"""
+    return ws.internal / f"{profile.name}_pool.xlsx"
 
 
 def stats(con: sqlite3.Connection) -> dict[str, Any]:

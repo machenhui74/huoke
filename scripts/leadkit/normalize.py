@@ -5,7 +5,8 @@
 - load_generic_csv(): 读任意 CSV，列名由调用方指定（让没有用 MediaCrawler 的人也能接入）。
 
 统一字段：platform, comment_id, post_id, post_url, post_title, search_keyword,
-          text, nickname, user_hash, created_at, like_count, parent_comment_id
+          text, nickname, user_hash, created_at, like_count, parent_comment_id,
+          note_text（笔记标题+话题标签+描述摘要，只给地域过滤用）, ip_province（评论者 IP 省级属地，没有则空）
 
 隐私：帖子 URL 一律去掉 ? 之后的部分（xsec_token 等会话令牌都在 query 里）。
 """
@@ -23,7 +24,10 @@ LOG = get_logger("normalize")
 FIELDS = [
     "platform", "comment_id", "post_id", "post_url", "post_title", "search_keyword",
     "text", "nickname", "user_hash", "created_at", "like_count", "parent_comment_id",
+    "note_text", "ip_province",
 ]
+# 笔记上下文里描述只取开头：标题和话题标签才是最可靠的本地信号，长描述只会引入噪声和体积
+NOTE_DESC_CHARS = 300
 
 
 def clean_url(url: str) -> str:
@@ -58,6 +62,13 @@ def find_csvs(root: Path, kind: str) -> list[Path]:
     return sorted(root.rglob(f"*_{kind}_*.csv"))
 
 
+def _note_text(row: dict[str, str], cm: dict[str, Any]) -> str:
+    """笔记标题 + 话题标签 + 描述开头，拼成一段给地域过滤用的上下文；映射里没有的列就跳过。"""
+    parts = [row.get(cm.get("title", ""), "") or "", row.get(cm.get("tags", ""), "") or "",
+             (row.get(cm.get("desc", ""), "") or "")[:NOTE_DESC_CHARS]]
+    return " ".join(p.strip() for p in parts if p and p.strip())
+
+
 def load_mediacrawler(
     source: Path, platform_map: dict[str, Any], tz: tzinfo, platform: str | None = None,
 ) -> list[dict[str, str]]:
@@ -80,6 +91,7 @@ def load_mediacrawler(
                     "post_url": clean_url(row.get(cm["post_url"], "")),
                     "post_title": row.get(cm.get("title", ""), "") or "",
                     "search_keyword": row.get(cm.get("keyword", ""), "") or "",
+                    "note_text": _note_text(row, cm),
                 }
     LOG.info("帖子 %d 条", len(posts))
 
@@ -97,7 +109,7 @@ def load_mediacrawler(
             post = posts.get(pid)
             if post is None:
                 orphan += 1  # 评论找不到帖子：保留评论，帖子信息留空，由人工判断
-                post = {"post_url": "", "post_title": "", "search_keyword": ""}
+                post = {"post_url": "", "post_title": "", "search_keyword": "", "note_text": ""}
             out.append({
                 "platform": platform,
                 "comment_id": cid,
@@ -109,6 +121,7 @@ def load_mediacrawler(
                 "created_at": when(row.get(cmm.get("created_at", ""), ""), tz),
                 "like_count": row.get(cmm.get("like_count", ""), "") or "",
                 "parent_comment_id": row.get(cmm.get("parent_comment_id", ""), "") or "",
+                "ip_province": row.get(cmm.get("ip_province", ""), "") or "",
             })
     if dup:
         LOG.info("跳过重复/无 ID 评论 %d 条", dup)
@@ -138,6 +151,7 @@ def load_generic_csv(
             "text": row.get(text_col, "") or "",
             "nickname": row.get(nickname_col, "") if nickname_col else "",
             "user_hash": "", "created_at": "", "like_count": "", "parent_comment_id": "",
+            "note_text": "", "ip_province": "",
         })
     LOG.info("通用 CSV %s：%d 行", path.name, len(out))
     return out

@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -24,10 +25,13 @@ from ..logger import get_logger
 from ..paths import Workspace
 from ..profile import Profile
 from ..tools import ENV_UV, IS_WIN, find_uv, kill_tree
+from . import pacing
 from .base import CollectResult, Collector
 
 LOG = get_logger("collect.mediacrawler")
 RUNNER = Path(__file__).with_name("mc_runner.py")
+# 会话总时长保险：节奏拉长后一次会话会更久，进程若卡住（没有任何输出）要有兜底，不能无限等。
+DEFAULT_MAX_SESSION_MINUTES = 120
 
 
 def _git_rev(mc_dir: Path) -> str:
@@ -60,6 +64,14 @@ class MediaCrawlerCollector(Collector):
         ov["ENABLE_GET_WORDCLOUD"] = False
         return ov
 
+    def pacing_cfg(self) -> dict[str, Any]:
+        """profile [collect.pacing] 合并默认值。默认开启：它只会让间隔更长，不改变请求量。"""
+        return pacing.normalize(self.profile.data.get("collect", {}).get("pacing"))
+
+    def max_session_seconds(self) -> int:
+        minutes = self.profile.data.get("collect", {}).get("max_session_minutes", DEFAULT_MAX_SESSION_MINUTES)
+        return int(minutes) * 60
+
     def preflight(self, plan: CollectPlan, platform_map: dict[str, Any], *, allow_exceed: bool = False,
                   allow_unverified: bool = False, **_: Any) -> list[str]:
         """参数 → profile 覆盖项 → 补丁 → 运行环境 → 台账，任何一项不过都拒绝。"""
@@ -67,6 +79,7 @@ class MediaCrawlerCollector(Collector):
         bad = validate_plan(plan, limits, allow_exceed)
         bad += validate_overrides(self.profile.data.get("collect", {}).get("overrides", {}))
         bad += check_patch(self.mc_dir, platform_map, allow_unverified)
+        bad += pacing.validate(self.pacing_cfg(), plan.sleep_sec)
         if self._python_cmd() is None:
             bad.append(f"找不到 uv，也没有 MediaCrawler/.venv。先运行 leadctl setup（uv 已装但不在 PATH 时，设置 {ENV_UV}）")
         bad += self.ledger.check(plan, limits)
@@ -123,9 +136,20 @@ class MediaCrawlerCollector(Collector):
             f"平台: {plan.platform}   关键词({len(plan.keywords)}): {', '.join(plan.keywords)}\n"
             f"每词笔记 ≤{plan.notes_per_keyword}，单帖评论 ≤{plan.comments_per_note}，并发 {plan.concurrency}，间隔 ≥{plan.sleep_sec}s\n"
             f"预计最多 {plan.est_notes} 篇笔记 / {plan.est_comments} 条评论\n"
+            f"{self._describe_pacing(plan)}\n"
             f"产物目录: {batch_dir}\n"
             f"命令(cwd={self.mc_dir}):\n  {' '.join(cmd)}"
         )
+
+    def _describe_pacing(self, plan: CollectPlan) -> str:
+        cfg = self.pacing_cfg()
+        if not cfg["enabled"]:
+            return f"节奏: 固定间隔 {plan.sleep_sec}s（已在 profile 关闭随机化；固定间隔是明显的机器特征，不建议）"
+        p = pacing.Pacer(plan.sleep_sec, cfg)
+        lo, hi = plan.sleep_sec, plan.sleep_sec * cfg["cap_factor"]
+        mins = pacing.estimate_minutes(plan.est_notes, len(plan.keywords), plan.sleep_sec, cfg)
+        return (f"节奏: 随机间隔 {lo:g}~{hi:g}s（平均 {p.expected():.1f}s），约 {cfg['long_pause_prob']:.0%} 的间隔后追加 "
+                f"{cfg['long_pause_sec'][0]}~{cfg['long_pause_sec'][1]}s 长停顿；整次约 {mins:.0f} 分钟（粗估，不含扫码）")
 
     # ---------- 执行 ----------
     def run(self, plan: CollectPlan, platform_map: dict[str, Any], batch_id: str, batch_dir: Path) -> CollectResult:
@@ -135,25 +159,38 @@ class MediaCrawlerCollector(Collector):
         cmd = self.build_command(plan, platform_map, batch_dir)
         ov = self.overrides(plan)
         monitor = RunMonitor.from_platform(plan, platform_map)
+        pcfg = self.pacing_cfg()
         env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8",
-               "LEADKIT_MC_OVERRIDES": json.dumps(ov)}
+               "LEADKIT_MC_OVERRIDES": json.dumps(ov),
+               "LEADKIT_PACING": json.dumps({"base": plan.sleep_sec, **pcfg}) if pcfg["enabled"] else "null"}
 
         # manifest：事后能说清「当时用什么参数、什么版本采的」
         (batch_dir / "manifest.json").write_text(json.dumps({
             "batch_id": batch_id, "platform": plan.platform, "keywords": plan.keywords,
             "notes_per_keyword": plan.notes_per_keyword, "comments_per_note": plan.comments_per_note,
-            "concurrency": plan.concurrency, "sleep_sec": plan.sleep_sec, "overrides": ov,
+            "concurrency": plan.concurrency, "sleep_sec": plan.sleep_sec, "overrides": ov, "pacing": pcfg,
             "mediacrawler_rev": _git_rev(self.mc_dir), "profile": self.profile.name,
         }, ensure_ascii=False, indent=2), encoding="utf-8")
 
         self.ledger.append(event="start", batch=batch_id, platform=plan.platform, keywords=plan.keywords,
-                           est_notes=plan.est_notes, est_comments=plan.est_comments)
+                           est_notes=plan.est_notes, est_comments=plan.est_comments,
+                           sleep_sec=plan.sleep_sec, pacing=pcfg)  # 记下参数组合，供红线 §9 事后校准
         LOG.info("开始采集 %s：%s", batch_id, " ".join(cmd))
         LOG.warning("如出现二维码请用对应 App 扫码；出现滑块/验证码请直接关闭，不要尝试绕过")
 
         status, reason, rc = "failed", "", None
         proc = subprocess.Popen(cmd, cwd=self.mc_dir, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, encoding="utf-8", errors="replace", bufsize=1)
+        timed_out = threading.Event()
+
+        def _on_timeout() -> None:
+            timed_out.set()
+            LOG.critical("会话超过 %d 分钟上限，终止采集进程", self.max_session_seconds() // 60)
+            self._stop(proc)
+
+        watchdog = threading.Timer(self.max_session_seconds(), _on_timeout)
+        watchdog.daemon = True
+        watchdog.start()
         try:
             with (batch_dir / "crawler.log").open("w", encoding="utf-8") as logf:
                 assert proc.stdout is not None
@@ -166,7 +203,9 @@ class MediaCrawlerCollector(Collector):
                         self._stop(proc)
                         break
             rc = proc.wait(timeout=30) if proc.poll() is None else proc.returncode
-            if monitor.abort_kind:
+            if timed_out.is_set():
+                status, reason = "failed", f"会话超过 {self.max_session_seconds() // 60} 分钟上限（profile collect.max_session_minutes）"
+            elif monitor.abort_kind:
                 status = f"aborted:{monitor.abort_kind}"
             else:
                 status = "ok" if rc == 0 else "failed"
@@ -179,6 +218,7 @@ class MediaCrawlerCollector(Collector):
             self._stop(proc)
             status, reason = "failed", "进程收尾超时，已强制结束"
         finally:
+            watchdog.cancel()
             if proc.poll() is None:
                 self._stop(proc)
 

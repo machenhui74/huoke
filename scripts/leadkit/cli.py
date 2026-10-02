@@ -17,11 +17,12 @@ from typing import Any
 
 from . import __version__, keywords as kw, pool
 from .collectors import BACKENDS
-from .guard import CollectPlan, effective_limits
+from .guard import HARD_CEILING, CollectPlan, effective_limits
 from .logger import get_logger, setup_logging
 from .normalize import load_generic_csv, load_mediacrawler
 from .paths import Workspace
 from .profile import Profile, ProfileError, list_profiles, load_platform_map, load_profile
+from .queue import MAX_ATTEMPTS, KeywordQueue, parse_proposal, parse_words
 from .scoring import Scorer
 from .setup import PINNED_REF, doctor, setup
 
@@ -54,6 +55,11 @@ def _scorer_or_die(profile: Profile) -> Scorer:
     return scorer
 
 
+def _queue(ws: Workspace, prof: Profile) -> KeywordQueue:
+    """每个 profile 一份队列：品类/地区不同，词表就不同。"""
+    return KeywordQueue(ws.state / f"queue_{prof.name}.json")
+
+
 def _mc_dir(args: argparse.Namespace) -> Path | None:
     raw = getattr(args, "mc_dir", None) or os.environ.get("LEADKIT_MC_DIR")
     return Path(raw).expanduser().resolve() if raw else None
@@ -84,7 +90,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
     ws = Workspace.resolve(args.workdir)
     ws.ensure()
     setup_logging(ws.logs, verbose=args.verbose, quiet=args.quiet)
-    return setup(ws, args.ref, _mc_dir(args), args.skip_sync, args.with_raw_identity)
+    return setup(ws, args.ref, _mc_dir(args), args.skip_sync, args.with_raw_identity, args.with_ip_province)
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -110,21 +116,29 @@ def cmd_keywords(args: argparse.Namespace) -> int:
         print("--category 和 --place 不能为空", file=sys.stderr)
         return 2
     phrases, nearby = kw.expand(category, place, prof)
+    # --add：调用方（agent 或人）自己补的词，比如家长的真实说法、症状词。排在模板词前面，因为通常更贴近真实搜索。
+    extra = [w for w in parse_words(args.add or "") if w not in phrases]
+    phrases = extra + phrases
     lines = kw.format_lines(phrases, nearby)
     path = kw.write_proposal(category, place, lines, ws.root / "keywords", args.out or "")
-    _emit(args, {"keywords": phrases, "nearby": nearby, "file": str(path)},
-          "\n".join(lines) + f"\n\n已写入 {path}\n从中人工挑选至多 3 条，用于 leadctl collect --keywords")
+    payload: dict[str, Any] = {"keywords": phrases, "nearby": nearby, "file": str(path)}
+    tail = f"\n\n已写入 {path}\n加 --enqueue 可存入待采队列，之后用 leadctl collect --next 分批采；或自行挑 ≤{HARD_CEILING['max_keywords']} 条用 --keywords"
+    if args.enqueue:
+        platform = args.platform or prof.section("collect").get("platform", "xhs")
+        # 附近区的词标了「仅备选、不要采」，不入队；agent 补的词来源记为 agent
+        usable = [w for w in phrases if not any(w.startswith(n) for n in nearby)]
+        q = _queue(ws, prof)
+        res = q.add(platform, [w for w in usable if w in extra], "agent")
+        res2 = q.add(platform, [w for w in usable if w not in extra], "expand")
+        res = {"added": res["added"] + res2["added"], "skipped": {**res["skipped"], **res2["skipped"]}}
+        payload["enqueued"] = res
+        tail = (f"\n\n已写入 {path}\n已入队 {len(res['added'])} 个词（平台 {platform}），跳过 {len(res['skipped'])} 个。"
+                f"附近区的备选词未入队。\n下一步：leadctl collect --platform {platform} --next（先预检，确认后加 --yes）")
+    _emit(args, payload, "\n".join(lines) + tail)
     return 0
 
 
-def _parse_keywords(raw: str) -> list[str]:
-    """支持逗号分隔；顺手去掉从清单里整行复制过来的 `# 注释`。"""
-    out = []
-    for part in raw.replace("，", ",").split(","):
-        word = part.split("#")[0].strip()
-        if word:
-            out.append(word)
-    return out
+_parse_keywords = parse_words  # 旧名保留，逻辑已挪到 queue.py 与队列共用
 
 
 def cmd_collect(args: argparse.Namespace) -> int:
@@ -137,14 +151,39 @@ def cmd_collect(args: argparse.Namespace) -> int:
         return 2
     limits = effective_limits(prof.section("limits"), args.allow_exceed_limits)
     collector = BACKENDS[args.backend](ws, prof, _mc_dir(args))
-    keywords = _parse_keywords(args.keywords)
     notes = args.notes if args.notes is not None else limits["max_notes_per_keyword"]
+
+    # 词的来源二选一：--keywords 手动给，或 --next 从队列取
+    queue = _queue(ws, prof) if args.next else None
+    picked: list[str] = []
+    if args.next and args.keywords:
+        print("--keywords 和 --next 只能二选一", file=sys.stderr)
+        return 2
+    if not args.next and not args.keywords:
+        print("需要 --keywords \"词1,词2\"，或 --next 从队列取词", file=sys.stderr)
+        return 2
+    if queue:
+        # 按今日剩余配额决定取几个词，而不是固定取满 3 个：配额不够就少取，别让预检拒绝整批
+        used = collector.ledger.usage_today(platform)
+        room = min((limits["daily_note_details"] - used["notes"]) // max(1, notes),
+                   (limits["daily_comments"] - used["comments"]) // max(1, notes))
+        # --max-words：新平台首次实机、或想分多次小量采时，主动少取几个（只能更少，不能超过额度允许的数量）
+        cap = args.max_words if getattr(args, "max_words", None) else limits["max_keywords"]
+        take = max(1, min(limits["max_keywords"], room, cap))
+        picked = [i["keyword"] for i in queue.pending(platform)[:take]]
+        left = queue.counts(platform)
+        if not picked:
+            msg = f"平台 {platform} 的待采队列是空的（已完成 {left['done']}，卡住 {left['stuck']}）。用 leadctl keywords --enqueue 或 queue add 补词"
+            _emit(args, {"ok": True, "empty": True, "queue": left}, msg)
+            return 0
+        LOG.info("从队列取词 %s（今日剩余可容纳 %d 个词，队列待采 %d）", picked, room, left["pending"])
+    keywords = picked or _parse_keywords(args.keywords)
     if args.comments is not None:
         comments = args.comments
     else:
         # 各项上限同时取满会超日配额（3词×5篇×5评=75 > 50），所以默认值按「今日剩余评论配额」反推，
         # 而不是直接取单帖上限。显式传 --comments 则以显式值为准（超了会在预检被拒）。
-        remaining = limits["daily_comments"] - collector.ledger.usage_today()["comments"]
+        remaining = limits["daily_comments"] - collector.ledger.usage_today(platform)["comments"]
         comments = max(1, min(limits["max_comments_per_note"], remaining // max(1, len(keywords) * notes)))
         LOG.info("单帖评论数未指定，按今日剩余配额 %d 自动取 %d", remaining, comments)
     plan = CollectPlan(
@@ -158,6 +197,8 @@ def cmd_collect(args: argparse.Namespace) -> int:
     issues = collector.preflight(plan, pmap, allow_exceed=args.allow_exceed_limits,
                                  allow_unverified=args.allow_unverified_platform)
     print(collector.describe(plan, batch_dir, pmap), file=sys.stderr)
+    if queue:
+        print(f"来源: 待采队列（本次取 {len(keywords)} 个，之后还剩 {left['pending'] - len(keywords)} 个待采）", file=sys.stderr)
     if issues:
         _emit(args, {"ok": False, "refused": issues},
               "\n拒绝执行，原因：\n" + "\n".join(f"  ✘ {i}" for i in issues))
@@ -168,14 +209,64 @@ def cmd_collect(args: argparse.Namespace) -> int:
         return 0
 
     res = collector.run(plan, pmap, batch_id, batch_dir)
+    if queue:
+        if res.ok:
+            queue.mark_done(platform, keywords, batch_id)
+        else:
+            # 被风控信号打断或用户中断不是词的问题，不计失败次数；其余（超量、进程失败）才计
+            queue.mark_failed(platform, keywords, batch_id, count=res.status not in ("aborted:block", "interrupted"))
     payload = {"ok": res.ok, "batch_id": res.batch_id, "batch_dir": str(res.batch_dir), "status": res.status,
                "notes": res.notes, "comments": res.comments, "reason": res.reason}
+    if queue:
+        payload["queue"] = queue.counts(platform)
     _emit(args, payload, f"采集 {res.status}：笔记 {res.notes} 篇 / 评论 {res.comments} 条\n产物：{res.batch_dir}"
           + (f"\n原因：{res.reason}" if res.reason else ""))
     if res.ok and args.ingest:
         ns = argparse.Namespace(**{**vars(args), "input": str(batch_dir), "text_col": None, "batch_id": batch_id})
         return cmd_ingest(ns)
     return 0 if res.ok else 1
+
+
+def cmd_queue(args: argparse.Namespace) -> int:
+    """待采队列管理：add / list / skip / retry。"""
+    ws, prof = _ctx(args)
+    platform = args.platform or prof.section("collect").get("platform", "xhs")
+    q = _queue(ws, prof)
+    words = parse_words(args.words or "")
+    if args.action == "add":
+        if args.from_proposal:
+            words += parse_proposal(Path(args.from_proposal).expanduser())
+        if not words:
+            print("add 需要 --words \"词1,词2\" 或 --from-proposal 清单文件", file=sys.stderr)
+            return 2
+        res = q.add(platform, words, "manual")
+        lines = [f"已入队 {len(res['added'])} 个：{', '.join(res['added']) or '无'}"]
+        lines += [f"  跳过「{w}」：{why}" for w, why in res["skipped"].items()]
+        _emit(args, res, "\n".join(lines))
+    elif args.action == "list":
+        items = q.items(None if args.all_platforms else platform)
+        icon = {"pending": "待采", "done": "已采", "skipped": "跳过"}
+        lines = []
+        for i in items:
+            tag = icon.get(i["status"], i["status"])
+            if i["status"] == "pending" and i.get("attempts", 0) >= MAX_ATTEMPTS:
+                tag = "卡住"
+            extra = f"  失败{i['attempts']}次" if i.get("attempts") else ""
+            lines.append(f"  [{tag}] {i['platform']}  {i['keyword']}{extra}")
+        c = q.counts(platform)
+        lines.append(f"\n平台 {platform}：待采 {c['pending']} / 已采 {c['done']} / 跳过 {c['skipped']} / 卡住 {c['stuck']}"
+                     + (f"\n「卡住」= 连续失败 {MAX_ATTEMPTS} 次，不会再被取用；确认原因后 leadctl queue retry" if c["stuck"] else ""))
+        _emit(args, {"items": items, "counts": c}, "\n".join(lines))
+    elif args.action == "skip":
+        if not words:
+            print("skip 需要 --words", file=sys.stderr)
+            return 2
+        hit = q.skip(platform, words)
+        _emit(args, {"skipped": hit}, f"已跳过 {len(hit)} 个：{', '.join(hit)}")
+    elif args.action == "retry":
+        hit = q.retry(platform, words or None)
+        _emit(args, {"retry": hit}, f"已恢复为待采 {len(hit)} 个：{', '.join(hit) or '无'}")
+    return 0
 
 
 def _resolve_input(ws: Workspace, value: str) -> Path:
@@ -223,7 +314,8 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     _emit(args, {"batch_id": batch_id, "records": len(records), **counts, "db": str(db), "export": str(public)},
           f"入库 {len(records)} 条（新增 {counts['new']}，更新 {counts['updated']}）\n"
           f"ready {counts['ready']} / 待复核 {counts['needs_review']} / 排除 {counts['excluded']}\n"
-          f"数据库：{db}\n人工池（脱敏，可外传）：{public}\n人工池（含昵称，仅内部）：{internal}")
+          f"数据库：{db}\n人工池 Excel（高相关在前并标红，含用户名，仅内部）：{pool.xlsx_path(ws, prof)}\n"
+          f"人工池 CSV（脱敏，可外传）：{public}")
     return 0
 
 
@@ -260,12 +352,12 @@ def cmd_pool(args: argparse.Namespace) -> int:
         if args.action == "rescore":
             counts = pool.rescore(con, prof, _scorer_or_die(prof), db)
             public, _, n = pool.export(con, ws, prof)
-            _emit(args, {**counts, "export": str(public)}, f"重打分 {counts['total']} 条，改判 {counts['changed']}，冻结 {counts['locked']}\n人工池 {n} 条 → {public}")
+            _emit(args, {**counts, "export": str(public)}, f"重打分 {counts['total']} 条，改判 {counts['changed']}，冻结 {counts['locked']}\n人工池 {n} 条 → {pool.xlsx_path(ws, prof)}（Excel，高相关标红）/ {public}（CSV）")
         elif args.action == "export":
             statuses = tuple(s.strip() for s in args.status.split(",") if s.strip())
             public, internal, n = pool.export(con, ws, prof, statuses)
             _emit(args, {"rows": n, "public": str(public), "internal": str(internal)},
-                  f"导出 {n} 条\n脱敏（可外传）：{public}\n含昵称（仅内部）：{internal}")
+                  f"导出 {n} 条（高相关在前并标红）\nExcel（含用户名，仅内部）：{pool.xlsx_path(ws, prof)}\n脱敏 CSV（可外传）：{public}\n含昵称 CSV（仅内部）：{internal}")
         elif args.action == "stats":
             st = pool.stats(con)
             human = "\n".join(f"{k}: {v}" for k, v in st.items())
@@ -323,6 +415,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--mc-dir", help="使用已有的 MediaCrawler 目录，只打补丁不克隆")
     s.add_argument("--skip-sync", action="store_true", help="跳过 uv sync")
     s.add_argument("--with-raw-identity", action="store_true", help="可选补丁：采集明文昵称和用户 ID（隐私风险，默认关）")
+    s.add_argument("--with-ip-province", action="store_true",
+                   help="可选补丁 0005：评论里额外存评论者 IP 的省级属地（如「浙江」），给地域过滤排除外省用；只到省，默认关")
     s.set_defaults(fn=cmd_setup)
 
     s = sub.add_parser("doctor", parents=[common], help="环境体检")
@@ -333,11 +427,24 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--category", required=True, help="品类，如 感统训练")
     s.add_argument("--place", "--ip", required=True, help="地区，如 台州椒江")
     s.add_argument("--out", help="输出文件（默认工作区 keywords/）")
+    s.add_argument("--add", help="自己补充的词（逗号分隔），会排在模板词前面；agent 联想出的长尾词放这里")
+    s.add_argument("--enqueue", action="store_true", help="把可采的词存入待采队列（附近区备选词不入队）")
+    s.add_argument("--platform", help="入队的平台（默认取 profile）")
     s.set_defaults(fn=cmd_keywords)
+
+    s = sub.add_parser("queue", parents=[common], help="待采关键词队列：add / list / skip / retry")
+    s.add_argument("action", choices=["add", "list", "skip", "retry"])
+    s.add_argument("--platform", help="平台（默认取 profile）")
+    s.add_argument("--words", help="逗号分隔的词")
+    s.add_argument("--from-proposal", help="add：读取 leadctl keywords 写出的清单文件")
+    s.add_argument("--all-platforms", action="store_true", help="list：显示所有平台")
+    s.set_defaults(fn=cmd_queue)
 
     s = sub.add_parser("collect", parents=[common], help="受限采集（默认 dry-run，加 --yes 才执行）")
     s.add_argument("--platform", help="xhs / dy / ks / bili / wb（默认取 profile）")
-    s.add_argument("--keywords", required=True, help="逗号分隔，最多 3 个")
+    s.add_argument("--keywords", help=f"逗号分隔，最多 {HARD_CEILING['max_keywords']} 个（与 --next 二选一）")
+    s.add_argument("--next", action="store_true", help="从待采队列自动取下一批词（按今日剩余配额决定取几个）")
+    s.add_argument("--max-words", type=int, help="配合 --next：本次最多取几个词（默认按额度取满；新平台首次实机建议 3）")
     s.add_argument("--notes", type=int, help="每词笔记数（默认取限额上限）")
     s.add_argument("--comments", type=int, help="单帖评论数（默认取限额上限）")
     s.add_argument("--sleep", type=int, help="请求间隔秒数（默认 3，不能更低）")

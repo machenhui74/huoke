@@ -1,7 +1,7 @@
 """关键词扩写：品类 + 地区 → 10~18 条家长真实会搜的短语，供人工挑选。
 
 纯本地：不联网、不调 API、不启动采集。
-一次采集最多 3 个词（见 guard.py），由人从这份清单里挑，不要整表开爬。
+一次采集的词数有上限（见 guard.py 的 max_keywords），清单里的词多了就用待采队列分批采，不要整表一次开爬。
 地区词表来自 profile 的 [geo]；地区不在词表里时不编造行政区，只用通用后缀补足。
 """
 from __future__ import annotations
@@ -128,7 +128,7 @@ def write_proposal(category: str, place: str, lines: list[str], out_dir: Path, o
     safe = lambda s: "".join(ch for ch in s if ch not in "/\\:\0")  # 品类/地区原词保留，只去路径分隔符
     path = Path(out) if out else out_dir / f"{safe(category)}_{safe(place)}.txt"
     path.parent.mkdir(parents=True, exist_ok=True)
-    header = [f"# 品类={category} 地区={place}", "# 从中人工挑选至多 3 条用于 leadctl collect --keywords，不要整表开采。"]
+    header = [f"# 品类={category} 地区={place}", "# 单次词数有上限，不要整表开采。可用 leadctl queue add --from-proposal 本文件 入队，再 collect --next 分批采。"]
     path.write_text("\n".join(header + lines) + "\n", encoding="utf-8")
     LOG.info("关键词清单已写入 %s", path)
     return path
