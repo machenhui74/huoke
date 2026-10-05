@@ -1,5 +1,7 @@
 """人工池导出：排序（高相关在前）、标红、Excel 文件本身是否合法、脱敏。"""
+import contextlib
 import csv
+import io
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -7,7 +9,7 @@ import zipfile
 from pathlib import Path
 
 import _helpers
-from leadkit import normalize, pool, xlsx
+from leadkit import cli, normalize, pool, xlsx
 from leadkit.paths import Workspace
 from leadkit.scoring import Scorer
 
@@ -144,6 +146,26 @@ class ExportOrderTest(unittest.TestCase):
         _, _, _, rows = self.export()
         self.assertEqual([c[0] for c in rows[0]], self.HEADERS)
 
+    def test_csvs_are_chinese_only_and_mirror_the_excel_columns(self):
+        """用户只看中文：两份 CSV 的表头、取值都不得出现英文（ready / needs_review / comment_id 等）。"""
+        self.force({"评论1": ("ready", 80), "评论2": ("needs_review", 60), "评论3": ("ready", 75), "评论4": ("needs_review", 50)})
+        public, internal, _, _ = self.export()
+        for path in (public, internal):
+            text = path.read_text(encoding="utf-8-sig")
+            header = text.splitlines()[0].split(",")
+            self.assertEqual(header[:5], ["意向分", "问题类型", "原帖标题", "评论内容", "评论时间"])
+            self.assertFalse(any(c.isascii() and c.isalpha() for h in header for c in h), header)   # 表头里没有任何英文字母
+            for raw in ("ready", "needs_review", "pending_review", "excluded"):
+                self.assertNotIn(raw, text)
+            self.assertIn("高相关", text)
+            self.assertIn("待复核", text)
+        pub_header = public.read_text(encoding="utf-8-sig").splitlines()[0].split(",")
+        int_header = internal.read_text(encoding="utf-8-sig").splitlines()[0].split(",")
+        self.assertNotIn("用户名", pub_header)                       # 可外传版仍然不含用户名
+        self.assertEqual(int_header[5], "用户名")                   # 内部版位置与 Excel 一致
+        with internal.open(encoding="utf-8-sig") as f:
+            self.assertIn("用户1", [r["用户名"] for r in csv.DictReader(f)])
+
     def test_ready_always_before_needs_review_even_with_lower_score(self):
         """只按分数排的话，99 分的待复核会插到 70 分的 ready 前面——那就不是「高相关在前」了。"""
         self.force({"评论1": ("ready", 70), "评论2": ("needs_review", 99), "评论3": ("ready", 85), "评论4": ("needs_review", 60)})
@@ -153,7 +175,7 @@ class ExportOrderTest(unittest.TestCase):
         self.assertEqual(order, ["评论3", "评论1", "评论2", "评论4"])
         self.assertEqual([r[0][0] for r in rows[1:]], ["85", "70", "99", "60"])   # 意向分是数字单元格
         with public.open(encoding="utf-8-sig") as f:
-            csv_order = [r["comment_text"] for r in csv.DictReader(f)]
+            csv_order = [r["评论内容"] for r in csv.DictReader(f)]
         self.assertEqual(csv_order, order)                       # CSV 顺序与 Excel 一致
 
     def test_only_ready_rows_are_red_by_default(self):
@@ -213,6 +235,25 @@ class ExportOrderTest(unittest.TestCase):
         self.con.commit()
         _, _, n, rows = self.export()
         self.assertEqual((n, len(rows)), (0, 1))
+
+
+class ScoreCommandTest(unittest.TestCase):
+    """leadctl score（不入库的快速打分）输出的 CSV 也只能是中文。"""
+
+    def test_scored_csv_has_chinese_headers_and_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "in.csv"
+            src.write_text("评论\n多少钱一个月\n哈哈哈\n", encoding="utf-8-sig")
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = cli.main(["--workdir", tmp, "-q", "score", "--input", str(src), "--text-col", "评论"])
+            self.assertEqual(rc, 0)
+            out = Path(tmp) / "exports" / "in.scored.csv"
+            text = out.read_text(encoding="utf-8-sig")
+            header = text.splitlines()[0].split(",")
+            self.assertEqual(header[:3], ["意向分", "问题类型", "评论内容"])
+            self.assertFalse(any(c.isascii() and c.isalpha() for h in header for c in h), header)
+            for raw in ("ready", "needs_review", "low_archive", "excluded"):
+                self.assertNotIn(raw, text)
 
 
 if __name__ == "__main__":

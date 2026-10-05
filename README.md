@@ -42,7 +42,7 @@ python scripts/leadctl.py doctor      # 全是 ✔ 就绪；有 ✘ 会告诉你
 python scripts/leadctl.py score --input examples/sample_comments.csv --text-col 评论 --keyword-col 搜索词
 ```
 
-得到 `~/.leadkit/exports/sample_comments.scored.csv`，每条评论都有 `status`（ready / needs_review / low_archive / excluded）、`problem`、`strength`。
+得到 `~/.leadkit/exports/sample_comments.scored.csv`，每条评论都有「分级」（高相关 / 待复核 / 低意向归档 / 已排除）、「问题类型」、「强度」。所有导出（Excel 和 CSV）表头与取值都是中文。
 
 ### 4. 完整流程：从搜词到线索池
 

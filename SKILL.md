@@ -42,7 +42,7 @@ setup(一次) → keywords --enqueue → collect --next(预检→用户同意→
 | 4 采集 | 同上加 `--yes --ingest` | 用户同意后执行；需要用户在场扫码；成功的词自动标为已采，失败/被风控打断的词留在队列。队列还有词就隔天（或 ≥30 分钟后）回到第 3 步 |
 | 队列 | `queue list` / `queue add --words "a,b"` / `queue skip` / `queue retry` | 查看进度、手动加词、跳过、恢复「卡住」的词（连续失败 3 次不再被取用） |
 | 5 入库 | `ingest --input latest` | 已采好的批次（或 CSV 路径）→ 打分 → 入库 → 导出 |
-| 6 查看 | `pool stats` / 读 `exports/<profile>_pool.xlsx`（ready 在前并标红；CSV 同内容无颜色） | 汇报：ready / 待复核数量、问题分布 |
+| 6 查看 | `pool stats` / 读 **`internal/<profile>_pool.xlsx`**（中文表头；高相关在前并标红；含用户名所以在 `internal/`，不在 `exports/`）。`exports/` 下是不含用户名的中文 CSV | 汇报：ready / 待复核数量、问题分布 |
 
 没有用 MediaCrawler、只有一份 CSV 时：`score --input a.csv --text-col 评论列名`（不入库）或 `ingest --input a.csv --text-col 评论列名`（入库）。
 

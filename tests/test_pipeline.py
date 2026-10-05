@@ -58,7 +58,7 @@ class PipelineTest(unittest.TestCase):
         header = public.read_text(encoding="utf-8-sig").splitlines()[0]
         for bad in pool.FORBIDDEN_EXPORT_COLS:
             self.assertNotIn(bad, header)
-        self.assertIn("nickname", internal.read_text(encoding="utf-8-sig").splitlines()[0])
+        self.assertIn("用户名", internal.read_text(encoding="utf-8-sig").splitlines()[0])
         # 库里任何 URL 都不能带令牌
         self.assertEqual(con.execute("SELECT COUNT(*) FROM leads WHERE post_url LIKE '%token%'").fetchone()[0], 0)
         con.close()

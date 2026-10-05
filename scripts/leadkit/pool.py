@@ -30,12 +30,18 @@ SCHEMA = Path(__file__).with_name("schema.sql")
 LOCKED_REACH = ("approved", "commented", "dm_sent", "wecom_added", "rejected", "skipped")
 REACH_STATUSES = ("pending_review", "approved", "commented", "dm_sent", "wecom_added", "rejected", "skipped", "none")
 # 绝不能出现在可外传导出里的列
-FORBIDDEN_EXPORT_COLS = ("nickname", "xsec_token", "creator_hash", "user_id")
+# 中文表头的「用户名/昵称」同样要拦：可外传的 CSV 现在是中文表头，只查英文名会漏
+FORBIDDEN_EXPORT_COLS = ("nickname", "xsec_token", "creator_hash", "user_id", "用户名", "昵称")
+# 内部英文字段名（数据库列名）。对外的表头一律是中文，见下方 CSV_EXTRA_COLUMNS 和 XLSX_COLUMNS。
 PUBLIC_FIELDS = [
     "platform", "comment_id", "post_id", "comment_text", "post_url", "search_keyword",
     "intent_score", "parent_likely", "problem", "strength", "status",
     "geo_hit", "target_region", "reach_status",
 ]
+# 取值也翻成中文：用户打开表只看中文，不应该再看到 ready / needs_review / pending_review
+STATUS_LABEL = {"ready": "高相关", "needs_review": "待复核", "low_archive": "低意向归档", "excluded": "已排除"}
+REACH_LABEL = {"pending_review": "待人工审核", "approved": "已批准", "commented": "已评论", "dm_sent": "已私信",
+               "wecom_added": "已加企微", "rejected": "已拒绝", "skipped": "已跳过", "none": "无"}
 
 
 def stamp(profile: Profile, when: datetime | None = None) -> str:
@@ -251,14 +257,48 @@ def _xlsx_value(field: str, value: Any) -> Any:
     return value
 
 
+def _cell(r: sqlite3.Row, field: str) -> Any:
+    """Excel 与 CSV 共用的取值：平台、时间、地域状态都显示成人话。"""
+    if field == "geo_label":
+        return GEO_LABEL.get(r["geo_state"] or "", "")
+    return _xlsx_value(field, r[field])
+
+
+# CSV 的列：前面与 Excel 完全一致（可外传的版本不含用户名），后面是方便筛选和回查的补充列。表头全部中文。
+CSV_EXTRA_COLUMNS = [("status", "分级"), ("parent_likely", "像家长"), ("strength", "强度"), ("tags", "命中标签"),
+                     ("target_region", "目标地区"), ("reach_status", "触达状态"), ("comment_id", "评论编号"), ("post_id", "笔记编号")]
+
+
+def csv_columns(with_nickname: bool, with_geo: bool) -> list[tuple[str, str]]:
+    """CSV 的 (字段, 中文表头) 列表。with_nickname=False 是可外传的脱敏版。"""
+    base = [(f, h) for f, h, *_ in XLSX_COLUMNS if with_nickname or f != "nickname"]
+    return base + ([(XLSX_GEO_COLUMN[0], XLSX_GEO_COLUMN[1])] if with_geo else []) + CSV_EXTRA_COLUMNS
+
+
+def _csv_cell(r: sqlite3.Row, field: str) -> Any:
+    v = _cell(r, field)
+    if field == "status":
+        return STATUS_LABEL.get(v, v)
+    if field == "parent_likely":
+        return "是" if v else "否"
+    if field == "reach_status":
+        return REACH_LABEL.get(v, v)
+    return "" if v is None else v
+
+
+def _write_csv(path: Path, rows: list[sqlite3.Row], cols: list[tuple[str, str]]) -> None:
+    """写中文表头的 CSV（带 BOM，Excel 直接双击打开不乱码）。"""
+    with path.open("w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow([h for _, h in cols])
+        for r in rows:
+            w.writerow([_csv_cell(r, fld) for fld, _ in cols])
+
+
 def _write_xlsx(path: Path, rows: list[sqlite3.Row], red: frozenset[int], with_geo: bool = False) -> None:
     """写最终交付的 Excel：含用户名，因此只放 internal/，不进 exports/。"""
     cols = XLSX_COLUMNS + ([XLSX_GEO_COLUMN] if with_geo else [])
-
-    def cell(r: sqlite3.Row, field: str) -> Any:
-        if field == "geo_label":
-            return GEO_LABEL.get(r["geo_state"] or "", "")
-        return _xlsx_value(field, r[field])
+    cell = _cell
 
     xlsx.write_xlsx(
         path, [h for _, h, *_ in cols],
@@ -273,6 +313,7 @@ def export(con: sqlite3.Connection, ws: Workspace, profile: Profile,
     """导出人工池。返回 (脱敏 CSV, 内部对照 CSV, 行数)。
 
     另有最终交付的 Excel：internal/<profile>_pool.xlsx（含用户名、笔记链接可点击、高相关行标红）。
+    三个文件的表头和取值全部是中文；CSV 的前几列与 Excel 一致，后面多几列方便筛选。
     排序：先按状态分层（ready 在前、needs_review 其次），层内按意向分从高到低。
     不能只按分数排——否则某条 needs_review 分数偏高时会插到 ready 前面，「高相关排在最前」就不成立了。
     标红：状态在 highlight_status（默认 ready）里的整行，Excel 里浅红底 + 深红字，CSV 无颜色。
@@ -293,18 +334,11 @@ def export(con: sqlite3.Connection, ws: Workspace, profile: Profile,
     red = frozenset(i for i, r in enumerate(rows) if r["status"] in highlight)
     public = ws.exports / f"{profile.name}_pool.csv"
     internal = ws.internal / f"{profile.name}_pool_with_nickname.csv"
-    with public.open("w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=PUBLIC_FIELDS)
-        w.writeheader()
-        for r in rows:
-            w.writerow({k: r[k] for k in PUBLIC_FIELDS})
+    with_geo = bool(profile.section("export").get("xlsx_geo_column", False))
+    _write_csv(public, rows, csv_columns(False, with_geo))
     _check_header(public)
-    with internal.open("w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=PUBLIC_FIELDS + ["nickname"])
-        w.writeheader()
-        for r in rows:
-            w.writerow({k: r[k] for k in PUBLIC_FIELDS + ["nickname"]})
-    _write_xlsx(xlsx_path(ws, profile), rows, red, bool(profile.section("export").get("xlsx_geo_column", False)))
+    _write_csv(internal, rows, csv_columns(True, with_geo))
+    _write_xlsx(xlsx_path(ws, profile), rows, red, with_geo)
     LOG.info("导出 %d 条（标红 %d）：Excel %s；CSV %s（脱敏）/ %s（含昵称）", len(rows), len(red),
              xlsx_path(ws, profile), public, internal)
     return public, internal, len(rows)

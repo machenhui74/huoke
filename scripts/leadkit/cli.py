@@ -326,17 +326,22 @@ def cmd_score(args: argparse.Namespace) -> int:
     src = Path(args.input).expanduser()
     records = load_generic_csv(src, text_col=args.text_col, keyword_col=args.keyword_col or "")
     out = Path(args.out) if args.out else ws.exports / (src.stem + ".scored.csv")  # 默认进工作区，skill 目录保持干净
-    fields = ["comment_text", "search_keyword", "intent_score", "status", "parent_likely", "problem", "strength", "tags",
-              "geo_hit", "target_region", "exclude_reason"]
+    # 表头和取值都用中文（与线索池导出一致）；英文字段名只在内部使用
+    fields = [("intent_score", "意向分"), ("problem", "问题类型"), ("comment_text", "评论内容"), ("search_keyword", "搜索词"),
+              ("status", "分级"), ("parent_likely", "像家长"), ("strength", "强度"), ("tags", "命中标签"),
+              ("geo_hit", "地域命中"), ("target_region", "目标地区"), ("exclude_reason", "排除原因")]
     counts: dict[str, int] = {}
     with out.open("w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=fields)
-        w.writeheader()
+        w = csv.writer(f)
+        w.writerow([h for _, h in fields])
         for r in records:
-            s = scorer.score(r["text"], r["search_keyword"] or args.keyword or "")
-            counts[s["status"]] = counts.get(s["status"], 0) + 1
-            w.writerow({"comment_text": r["text"], "search_keyword": r["search_keyword"] or args.keyword or "",
-                        **{k: s[k] for k in fields[2:]}})
+            kw = r["search_keyword"] or args.keyword or ""
+            s = scorer.score(r["text"], kw)
+            label = pool.STATUS_LABEL.get(s["status"], s["status"])
+            counts[label] = counts.get(label, 0) + 1
+            row = {**s, "comment_text": r["text"], "search_keyword": kw}
+            w.writerow([pool.STATUS_LABEL.get(row[k], row[k]) if k == "status"
+                        else ("是" if row[k] else "否") if k in ("parent_likely", "geo_hit") else row[k] for k, _ in fields])
     _emit(args, {"out": str(out), "counts": counts}, f"已打分 {len(records)} 条 → {out}\n分布：{counts}")
     return 0
 
