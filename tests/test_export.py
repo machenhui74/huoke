@@ -16,10 +16,10 @@ from leadkit.scoring import Scorer
 NS = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 
 
-def read_sheet(path: Path) -> list[list[tuple[str, str]]]:
-    """读回 xlsx：每行是 [(单元格文本或数字, 样式下标), ...]，不依赖第三方库。"""
+def read_sheet(path: Path, sheet_num: int = 1) -> list[list[tuple[str, str]]]:
+    """读回 xlsx 指定工作表：每行是 [(单元格文本或数字, 样式下标), ...]，不依赖第三方库。"""
     with zipfile.ZipFile(path) as z:
-        root = ET.fromstring(z.read("xl/worksheets/sheet1.xml"))
+        root = ET.fromstring(z.read(f"xl/worksheets/sheet{sheet_num}.xml"))
     rows = []
     for row in root.findall(".//m:sheetData/m:row", NS):
         cells = []
@@ -29,6 +29,13 @@ def read_sheet(path: Path) -> list[list[tuple[str, str]]]:
             cells.append(((t.text or "") if t is not None else (v.text if v is not None else ""), c.get("s")))
         rows.append(cells)
     return rows
+
+
+def get_sheet_names(path: Path) -> list[str]:
+    """从 workbook.xml 读取所有工作表名称。"""
+    with zipfile.ZipFile(path) as z:
+        wb = ET.fromstring(z.read("xl/workbook.xml"))
+    return [s.get("name") for s in wb.findall(".//m:sheet", NS)]
 
 
 class XlsxWriterTest(unittest.TestCase):
@@ -108,6 +115,91 @@ class XlsxWriterTest(unittest.TestCase):
     def test_empty_table_still_valid(self):
         rows = self.write([])
         self.assertEqual(len(rows), 1)  # 只有表头
+
+
+class XlsxMultiSheetTest(unittest.TestCase):
+    """多工作表写入测试。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "multi.xlsx"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_two_sheets_with_correct_names(self):
+        """两个工作表，名称正确。"""
+        sheets = [
+            xlsx.SheetSpec("线索池", ["甲", "乙"], [["a", 1], ["b", 2]]),
+            xlsx.SheetSpec("AI智能排除", ["甲", "乙", "丙"], [["x", 3, "reason1"]]),
+        ]
+        xlsx.write_xlsx_multi(self.path, sheets)
+        names = get_sheet_names(self.path)
+        self.assertEqual(names, ["线索池", "AI智能排除"])
+
+    def test_each_sheet_has_correct_data(self):
+        """每个工作表有各自的表头和数据。"""
+        sheets = [
+            xlsx.SheetSpec("Sheet1", ["A", "B"], [["r1c1", "r1c2"]]),
+            xlsx.SheetSpec("Sheet2", ["X", "Y", "Z"], [["s2r1", "s2r2", "s2r3"], ["s2r4", "s2r5", "s2r6"]]),
+        ]
+        xlsx.write_xlsx_multi(self.path, sheets)
+        sheet1 = read_sheet(self.path, 1)
+        sheet2 = read_sheet(self.path, 2)
+        self.assertEqual([c[0] for c in sheet1[0]], ["A", "B"])
+        self.assertEqual([c[0] for c in sheet1[1]], ["r1c1", "r1c2"])
+        self.assertEqual([c[0] for c in sheet2[0]], ["X", "Y", "Z"])
+        self.assertEqual(len(sheet2), 3)  # 表头 + 2 行数据
+
+    def test_all_parts_well_formed_xml(self):
+        """多工作表文件的所有 XML 部件都是合法的。"""
+        sheets = [
+            xlsx.SheetSpec("线索池", ["甲"], [["a"]]),
+            xlsx.SheetSpec("AI智能排除", ["乙"], [["b"]]),
+        ]
+        xlsx.write_xlsx_multi(self.path, sheets)
+        with zipfile.ZipFile(self.path) as z:
+            self.assertIsNone(z.testzip())
+            for name in z.namelist():
+                ET.fromstring(z.read(name))
+
+    def test_red_rows_and_links_work_per_sheet(self):
+        """标红和链接在每个工作表上独立工作。"""
+        url = "https://example.com/test"
+        sheets = [
+            xlsx.SheetSpec("S1", ["A", "B"], [["text", url], ["more", url]],
+                           red_rows={0}, link_cols={1}),
+            xlsx.SheetSpec("S2", ["X"], [["plain"]]),
+        ]
+        xlsx.write_xlsx_multi(self.path, sheets)
+        sheet1 = read_sheet(self.path, 1)
+        # 第一行数据应该是红色，第二行不是
+        self.assertEqual(sheet1[1][0][1], str(xlsx.S_RED_TEXT))
+        self.assertEqual(sheet1[2][0][1], str(xlsx.S_TEXT))
+        # 链接应该存在于 sheet1 的 rels 中
+        with zipfile.ZipFile(self.path) as z:
+            self.assertIn("xl/worksheets/_rels/sheet1.xml.rels", z.namelist())
+            self.assertNotIn("xl/worksheets/_rels/sheet2.xml.rels", z.namelist())
+
+    def test_sheet_name_sanitized(self):
+        """工作表名称中的非法字符被清除。"""
+        sheets = [xlsx.SheetSpec("Test[]:*?/\\Name", ["A"], [[1]])]
+        xlsx.write_xlsx_multi(self.path, sheets)
+        names = get_sheet_names(self.path)
+        self.assertFalse(set(names[0]) & set("[]:*?/\\"))
+
+    def test_first_sheet_is_selected(self):
+        """第一个工作表默认选中。"""
+        sheets = [
+            xlsx.SheetSpec("S1", ["A"], [[1]]),
+            xlsx.SheetSpec("S2", ["B"], [[2]]),
+        ]
+        xlsx.write_xlsx_multi(self.path, sheets)
+        with zipfile.ZipFile(self.path) as z:
+            sheet1 = z.read("xl/worksheets/sheet1.xml").decode()
+            sheet2 = z.read("xl/worksheets/sheet2.xml").decode()
+        self.assertIn('tabSelected="1"', sheet1)
+        self.assertNotIn('tabSelected="1"', sheet2)
 
 
 class ExportOrderTest(unittest.TestCase):
@@ -235,6 +327,91 @@ class ExportOrderTest(unittest.TestCase):
         self.con.commit()
         _, _, n, rows = self.export()
         self.assertEqual((n, len(rows)), (0, 1))
+
+    def test_excel_has_two_sheets_with_excluded_on_second(self):
+        """Excel 有两个工作表：线索池 和 AI智能排除。"""
+        self.force({"评论1": ("ready", 80), "评论2": ("needs_review", 60),
+                    "评论3": ("excluded", 40), "评论4": ("excluded", 30)})
+        # 设置排除原因
+        self.con.execute("UPDATE leads SET exclude_reason='低意向归档' WHERE comment_text='评论3'")
+        self.con.execute("UPDATE leads SET exclude_reason='地域不符' WHERE comment_text='评论4'")
+        self.con.commit()
+        self.export()
+        xlsx_file = pool.xlsx_path(self.ws, self.prof)
+        names = get_sheet_names(xlsx_file)
+        self.assertEqual(names, ["线索池", "AI智能排除"])
+
+    def test_excluded_sheet_contains_excluded_leads_with_reason(self):
+        """AI智能排除工作表包含排除的线索及其排除原因。"""
+        # 设置所有4条评论的状态
+        self.force({"评论1": ("ready", 80), "评论2": ("excluded", 50),
+                    "评论3": ("excluded", 30), "评论4": ("needs_review", 60)})
+        self.con.execute("UPDATE leads SET exclude_reason='low_archive score=50' WHERE comment_text='评论2'")
+        self.con.execute("UPDATE leads SET exclude_reason='地域不符' WHERE comment_text='评论3'")
+        self.con.commit()
+        self.export()
+        xlsx_file = pool.xlsx_path(self.ws, self.prof)
+        # Sheet1 只有人工池（ready + needs_review）
+        sheet1 = read_sheet(xlsx_file, 1)
+        self.assertEqual(len(sheet1) - 1, 2)  # 1 ready + 1 needs_review
+        # Sheet2 有排除的线索
+        sheet2 = read_sheet(xlsx_file, 2)
+        self.assertEqual(len(sheet2) - 1, 2)  # 2 条 excluded
+        # 按意向分降序排列
+        self.assertEqual(sheet2[1][3][0], "评论2")  # 分数 50
+        self.assertEqual(sheet2[2][3][0], "评论3")  # 分数 30
+        # 最后一列是排除原因
+        header = [c[0] for c in sheet2[0]]
+        self.assertIn("排除原因", header)
+        reason_idx = header.index("排除原因")
+        self.assertEqual(sheet2[1][reason_idx][0], "low_archive score=50")
+        self.assertEqual(sheet2[2][reason_idx][0], "地域不符")
+
+    def test_excluded_sheet_has_no_red_rows(self):
+        """AI智能排除工作表不标红任何行。"""
+        self.force({"评论1": ("excluded", 90), "评论2": ("excluded", 80)})
+        self.export()
+        sheet2 = read_sheet(pool.xlsx_path(self.ws, self.prof), 2)
+        red_styles = {str(xlsx.S_RED_TEXT), str(xlsx.S_RED_NUM), str(xlsx.S_RED_LINK)}
+        for row in sheet2[1:]:  # 跳过表头
+            for _, style in row:
+                self.assertNotIn(style, red_styles)
+
+    def test_public_xlsx_exists_and_no_nickname(self):
+        """公开版 xlsx 存在于 exports/，且不含用户名列。"""
+        self.force({"评论1": ("ready", 80), "评论2": ("excluded", 40)})
+        self.export()
+        public_xlsx = pool.xlsx_path_public(self.ws, self.prof)
+        self.assertTrue(public_xlsx.exists())
+        self.assertEqual(public_xlsx.parent, self.ws.exports)
+        # 检查两个工作表都没有用户名列
+        for sheet_num in (1, 2):
+            sheet = read_sheet(public_xlsx, sheet_num)
+            header = [c[0] for c in sheet[0]]
+            self.assertNotIn("用户名", header)
+            self.assertNotIn("昵称", header)
+
+    def test_public_xlsx_has_same_two_sheets(self):
+        """公开版 xlsx 也有两个工作表，名称相同。"""
+        self.force({"评论1": ("ready", 80), "评论2": ("excluded", 40)})
+        self.export()
+        internal_names = get_sheet_names(pool.xlsx_path(self.ws, self.prof))
+        public_names = get_sheet_names(pool.xlsx_path_public(self.ws, self.prof))
+        self.assertEqual(internal_names, public_names)
+        self.assertEqual(public_names, ["线索池", "AI智能排除"])
+
+    def test_csv_still_only_pool_not_excluded(self):
+        """CSV 仍然只导出人工池（ready + needs_review），不包含 excluded。"""
+        self.force({"评论1": ("ready", 80), "评论2": ("needs_review", 60),
+                    "评论3": ("excluded", 40), "评论4": ("excluded", 30)})
+        public, internal, n, _ = self.export()
+        self.assertEqual(n, 2)  # 只有 ready + needs_review
+        for path in (public, internal):
+            text = path.read_text(encoding="utf-8-sig")
+            self.assertIn("评论1", text)
+            self.assertIn("评论2", text)
+            self.assertNotIn("评论3", text)
+            self.assertNotIn("评论4", text)
 
 
 class ScoreCommandTest(unittest.TestCase):

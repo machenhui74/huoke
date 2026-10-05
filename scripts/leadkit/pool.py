@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from . import xlsx
+from .xlsx import SheetSpec
 from .geo import GEO_LABEL
 from .logger import get_logger
 from .paths import Workspace
@@ -243,6 +244,8 @@ XLSX_COLUMNS: list[tuple[str, str, float, bool, bool]] = [
 ]
 # 可选的第 10 列：地域把握。由 profile 的 [export] xlsx_geo_column 打开，放在最后，前 9 列保持原样
 XLSX_GEO_COLUMN = ("geo_label", "地域把握", 12, False, False)
+# 「排除原因」列：仅出现在 AI智能排除 工作表
+XLSX_EXCLUDE_REASON_COLUMN = ("exclude_reason", "排除原因", 24, False, False)
 DEFAULT_HIGHLIGHT = ("ready",)  # 默认只有 ready（高意向）标红；profile 的 [export] highlight_status 可改
 # 平台代号 → 表里显示的名字（未知代号原样显示）
 PLATFORM_LABEL = {"xhs": "小红书", "dy": "抖音", "douyin": "抖音"}
@@ -295,14 +298,40 @@ def _write_csv(path: Path, rows: list[sqlite3.Row], cols: list[tuple[str, str]])
             w.writerow([_csv_cell(r, fld) for fld, _ in cols])
 
 
+def _xlsx_cols(with_geo: bool = False, with_nickname: bool = True,
+               with_exclude_reason: bool = False) -> list[tuple[str, str, float, bool, bool]]:
+    """根据选项构建列定义列表。"""
+    cols = [c for c in XLSX_COLUMNS if with_nickname or c[0] != "nickname"]
+    if with_geo:
+        cols = cols + [XLSX_GEO_COLUMN]
+    if with_exclude_reason:
+        cols = cols + [XLSX_EXCLUDE_REASON_COLUMN]
+    return cols
+
+
+def _build_sheet_spec(name: str, rows: list[sqlite3.Row], red: frozenset[int],
+                      with_geo: bool = False, with_nickname: bool = True,
+                      with_exclude_reason: bool = False) -> SheetSpec:
+    """构建一个工作表的规格，用于多工作表导出。"""
+    cols = _xlsx_cols(with_geo, with_nickname, with_exclude_reason)
+    return SheetSpec(
+        name=name,
+        headers=[h for _, h, *_ in cols],
+        rows=[[_cell(r, f) for f, *_ in cols] for r in rows],
+        red_rows=red,
+        widths=[w for _, _, w, *_ in cols],
+        number_cols=frozenset(i for i, c in enumerate(cols) if c[3]),
+        link_cols=frozenset(i for i, c in enumerate(cols) if c[4]),
+    )
+
+
 def _write_xlsx(path: Path, rows: list[sqlite3.Row], red: frozenset[int], with_geo: bool = False) -> None:
     """写最终交付的 Excel：含用户名，因此只放 internal/，不进 exports/。"""
-    cols = XLSX_COLUMNS + ([XLSX_GEO_COLUMN] if with_geo else [])
-    cell = _cell
+    cols = _xlsx_cols(with_geo, with_nickname=True)
 
     xlsx.write_xlsx(
         path, [h for _, h, *_ in cols],
-        [[cell(r, f) for f, *_ in cols] for r in rows],
+        [[_cell(r, f) for f, *_ in cols] for r in rows],
         red_rows=red, widths=[w for _, _, w, *_ in cols],
         number_cols={i for i, c in enumerate(cols) if c[3]},
         link_cols={i for i, c in enumerate(cols) if c[4]})
@@ -312,7 +341,11 @@ def export(con: sqlite3.Connection, ws: Workspace, profile: Profile,
            statuses: tuple[str, ...] = ("ready", "needs_review")) -> tuple[Path, Path, int]:
     """导出人工池。返回 (脱敏 CSV, 内部对照 CSV, 行数)。
 
-    另有最终交付的 Excel：internal/<profile>_pool.xlsx（含用户名、笔记链接可点击、高相关行标红）。
+    另有最终交付的 Excel：internal/<profile>_pool.xlsx（含用户名、笔记链接可点击、高相关行标红），
+    以及 exports/<profile>_pool.xlsx（脱敏版，无昵称，可外传）。
+    两个 Excel 都有两个工作表：
+      - Sheet1「线索池」：ready + needs_review
+      - Sheet2「AI智能排除」：所有 excluded 线索，按意向分降序，包含排除原因
     三个文件的表头和取值全部是中文；CSV 的前几列与 Excel 一致，后面多几列方便筛选。
     排序：先按状态分层（ready 在前、needs_review 其次），层内按意向分从高到低。
     不能只按分数排——否则某条 needs_review 分数偏高时会插到 ready 前面，「高相关排在最前」就不成立了。
@@ -321,32 +354,71 @@ def export(con: sqlite3.Connection, ws: Workspace, profile: Profile,
     ws.exports.mkdir(parents=True, exist_ok=True)
     ws.internal.mkdir(parents=True, exist_ok=True)
     marks = ",".join("?" for _ in statuses)
-    # 原帖标题只存在 raw_comments 里；原始评论过期被清理后拿不到，用 LEFT JOIN 退化成空而不是丢线索
-    rows = list(con.execute(
+
+    # 查询人工池线索（ready + needs_review）
+    pool_rows = list(con.execute(
         f"""SELECT l.platform, l.comment_id, l.note_id AS post_id, l.comment_text, l.post_url, l.search_keyword,
                l.intent_score, l.parent_likely, l.problem, l.strength, l.tags, l.status, l.geo_hit, l.target_region,
-               l.reach_status, l.nickname, l.commented_at, l.geo_state, COALESCE(r.note_title, '') AS post_title
+               l.reach_status, l.nickname, l.commented_at, l.geo_state, l.exclude_reason,
+               COALESCE(r.note_title, '') AS post_title
             FROM leads l LEFT JOIN raw_comments r ON r.platform = l.platform AND r.comment_id = l.comment_id
             WHERE l.status IN ({marks})
             ORDER BY CASE l.status WHEN 'ready' THEN 0 WHEN 'needs_review' THEN 1 ELSE 2 END,
                      l.intent_score DESC, l.platform, l.comment_id""", statuses))
+
+    # 查询排除线索（excluded），按意向分降序排列
+    excluded_rows = list(con.execute(
+        """SELECT l.platform, l.comment_id, l.note_id AS post_id, l.comment_text, l.post_url, l.search_keyword,
+               l.intent_score, l.parent_likely, l.problem, l.strength, l.tags, l.status, l.geo_hit, l.target_region,
+               l.reach_status, l.nickname, l.commented_at, l.geo_state, l.exclude_reason,
+               COALESCE(r.note_title, '') AS post_title
+            FROM leads l LEFT JOIN raw_comments r ON r.platform = l.platform AND r.comment_id = l.comment_id
+            WHERE l.status = 'excluded'
+            ORDER BY l.intent_score DESC, l.platform, l.comment_id"""))
+
     highlight = set(profile.section("export").get("highlight_status", DEFAULT_HIGHLIGHT))
-    red = frozenset(i for i, r in enumerate(rows) if r["status"] in highlight)
-    public = ws.exports / f"{profile.name}_pool.csv"
-    internal = ws.internal / f"{profile.name}_pool_with_nickname.csv"
+    red = frozenset(i for i, r in enumerate(pool_rows) if r["status"] in highlight)
     with_geo = bool(profile.section("export").get("xlsx_geo_column", False))
-    _write_csv(public, rows, csv_columns(False, with_geo))
-    _check_header(public)
-    _write_csv(internal, rows, csv_columns(True, with_geo))
-    _write_xlsx(xlsx_path(ws, profile), rows, red, with_geo)
-    LOG.info("导出 %d 条（标红 %d）：Excel %s；CSV %s（脱敏）/ %s（含昵称）", len(rows), len(red),
-             xlsx_path(ws, profile), public, internal)
-    return public, internal, len(rows)
+
+    # CSV 只导出人工池（ready + needs_review），不包含 excluded
+    public_csv = ws.exports / f"{profile.name}_pool.csv"
+    internal_csv = ws.internal / f"{profile.name}_pool_with_nickname.csv"
+    _write_csv(public_csv, pool_rows, csv_columns(False, with_geo))
+    _check_header(public_csv)
+    _write_csv(internal_csv, pool_rows, csv_columns(True, with_geo))
+
+    # 构建双工作表 Excel
+    # Sheet1: 线索池（人工池）
+    pool_sheet_internal = _build_sheet_spec("线索池", pool_rows, red, with_geo, with_nickname=True)
+    pool_sheet_public = _build_sheet_spec("线索池", pool_rows, red, with_geo, with_nickname=False)
+
+    # Sheet2: AI智能排除（包含排除原因列，无标红）
+    excluded_sheet_internal = _build_sheet_spec(
+        "AI智能排除", excluded_rows, frozenset(), with_geo, with_nickname=True, with_exclude_reason=True)
+    excluded_sheet_public = _build_sheet_spec(
+        "AI智能排除", excluded_rows, frozenset(), with_geo, with_nickname=False, with_exclude_reason=True)
+
+    # 写入内部版 Excel（含用户名）
+    xlsx.write_xlsx_multi(xlsx_path(ws, profile), [pool_sheet_internal, excluded_sheet_internal])
+
+    # 写入公开版 Excel（脱敏，无用户名）
+    public_xlsx = xlsx_path_public(ws, profile)
+    xlsx.write_xlsx_multi(public_xlsx, [pool_sheet_public, excluded_sheet_public])
+
+    LOG.info("导出人工池 %d 条（标红 %d）+ 排除 %d 条：Excel %s / %s（脱敏）；CSV %s（脱敏）/ %s（含昵称）",
+             len(pool_rows), len(red), len(excluded_rows),
+             xlsx_path(ws, profile), public_xlsx, public_csv, internal_csv)
+    return public_csv, internal_csv, len(pool_rows)
 
 
 def xlsx_path(ws: Workspace, profile: Profile) -> Path:
     """最终交付 Excel 的位置（含用户名，所以放 internal/）。CLI 和测试都用这个函数找文件。"""
     return ws.internal / f"{profile.name}_pool.xlsx"
+
+
+def xlsx_path_public(ws: Workspace, profile: Profile) -> Path:
+    """脱敏版 Excel 的位置（无用户名，放 exports/ 可外传）。"""
+    return ws.exports / f"{profile.name}_pool.xlsx"
 
 
 def stats(con: sqlite3.Connection) -> dict[str, Any]:
