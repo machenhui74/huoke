@@ -233,6 +233,16 @@ class ExportOrderTest(unittest.TestCase):
         public, internal, n = pool.export(self.con, self.ws, self.prof)
         return public, internal, n, read_sheet(pool.xlsx_path(self.ws, self.prof))
 
+    def test_filenames_are_stamped_with_today(self):
+        """正式项目按天留档：同一天重导覆盖当天，不覆盖其他日期。"""
+        public, internal, _, _ = self.export()
+        day = pool.export_day(self.prof)
+        self.assertEqual(public.name, f"{self.prof.name}_pool_{day}.csv")
+        self.assertEqual(internal.name, f"{self.prof.name}_pool_with_nickname_{day}.csv")
+        self.assertEqual(pool.xlsx_path(self.ws, self.prof).name, f"{self.prof.name}_pool_{day}.xlsx")
+        self.assertEqual(pool.xlsx_path_public(self.ws, self.prof).name, f"{self.prof.name}_pool_{day}.xlsx")
+        self.assertTrue(pool.xlsx_path_public(self.ws, self.prof).is_file())
+
     def test_header_is_exactly_the_requested_columns(self):
         """最终表头是用户指定的 9 列，顺序固定；不能混进状态、强度、ID 等别的列。"""
         _, _, _, rows = self.export()
@@ -424,8 +434,10 @@ class ScoreCommandTest(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 rc = cli.main(["--workdir", tmp, "-q", "score", "--input", str(src), "--text-col", "评论"])
             self.assertEqual(rc, 0)
-            out = Path(tmp) / "exports" / "in.scored.csv"
-            text = out.read_text(encoding="utf-8-sig")
+            files = list((Path(tmp) / "exports").glob("in.scored.*.csv"))
+            self.assertEqual(len(files), 1)
+            self.assertRegex(files[0].name, r"^in\.scored\.\d{4}-\d{2}-\d{2}\.csv$")
+            text = files[0].read_text(encoding="utf-8-sig")
             header = text.splitlines()[0].split(",")
             self.assertEqual(header[:3], ["意向分", "问题类型", "评论内容"])
             self.assertFalse(any(c.isascii() and c.isalpha() for h in header for c in h), header)

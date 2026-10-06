@@ -325,7 +325,9 @@ def cmd_score(args: argparse.Namespace) -> int:
     scorer = _scorer_or_die(prof)
     src = Path(args.input).expanduser()
     records = load_generic_csv(src, text_col=args.text_col, keyword_col=args.keyword_col or "")
-    out = Path(args.out) if args.out else ws.exports / (src.stem + ".scored.csv")  # 默认进工作区，skill 目录保持干净
+    # 不指定 --out 时文件名带当天日期，避免第二天打分盖掉前一天的结果
+    day = datetime.now(prof.tz).strftime("%Y-%m-%d")
+    out = Path(args.out) if args.out else ws.exports / f"{src.stem}.scored.{day}.csv"
     # 表头和取值都用中文（与线索池导出一致）；英文字段名只在内部使用
     fields = [("intent_score", "意向分"), ("problem", "问题类型"), ("comment_text", "评论内容"), ("search_keyword", "搜索词"),
               ("status", "分级"), ("parent_likely", "像家长"), ("strength", "强度"), ("tags", "命中标签"),

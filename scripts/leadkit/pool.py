@@ -337,12 +337,17 @@ def _write_xlsx(path: Path, rows: list[sqlite3.Row], red: frozenset[int], with_g
         link_cols={i for i, c in enumerate(cols) if c[4]})
 
 
+def export_day(profile: Profile) -> str:
+    """导出文件名用的日期（画像时区的当天）。同一天多次导出会覆盖当天那一份，不会盖掉别的日期。"""
+    return datetime.now(profile.tz).strftime("%Y-%m-%d")
+
+
 def export(con: sqlite3.Connection, ws: Workspace, profile: Profile,
            statuses: tuple[str, ...] = ("ready", "needs_review")) -> tuple[Path, Path, int]:
     """导出人工池。返回 (脱敏 CSV, 内部对照 CSV, 行数)。
 
-    另有最终交付的 Excel：internal/<profile>_pool.xlsx（含用户名、笔记链接可点击、高相关行标红），
-    以及 exports/<profile>_pool.xlsx（脱敏版，无昵称，可外传）。
+    文件名带当天日期，例如 internal/<profile>_pool_2026-10-06.xlsx（含用户名），
+    exports/ 下同名的是脱敏版。同一天重导只刷新这一天，历史日期保留。
     两个 Excel 都有两个工作表：
       - Sheet1「线索池」：ready + needs_review
       - Sheet2「AI智能排除」：所有 excluded 线索，按意向分降序，包含排除原因
@@ -380,9 +385,10 @@ def export(con: sqlite3.Connection, ws: Workspace, profile: Profile,
     red = frozenset(i for i, r in enumerate(pool_rows) if r["status"] in highlight)
     with_geo = bool(profile.section("export").get("xlsx_geo_column", False))
 
-    # CSV 只导出人工池（ready + needs_review），不包含 excluded
-    public_csv = ws.exports / f"{profile.name}_pool.csv"
-    internal_csv = ws.internal / f"{profile.name}_pool_with_nickname.csv"
+    # CSV 只导出人工池（ready + needs_review），不包含 excluded。文件名带日期，避免第二天盖掉前一天。
+    day = export_day(profile)
+    public_csv = ws.exports / f"{profile.name}_pool_{day}.csv"
+    internal_csv = ws.internal / f"{profile.name}_pool_with_nickname_{day}.csv"
     _write_csv(public_csv, pool_rows, csv_columns(False, with_geo))
     _check_header(public_csv)
     _write_csv(internal_csv, pool_rows, csv_columns(True, with_geo))
@@ -411,14 +417,16 @@ def export(con: sqlite3.Connection, ws: Workspace, profile: Profile,
     return public_csv, internal_csv, len(pool_rows)
 
 
-def xlsx_path(ws: Workspace, profile: Profile) -> Path:
-    """最终交付 Excel 的位置（含用户名，所以放 internal/）。CLI 和测试都用这个函数找文件。"""
-    return ws.internal / f"{profile.name}_pool.xlsx"
+def xlsx_path(ws: Workspace, profile: Profile, day: str | None = None) -> Path:
+    """含用户名的 Excel（internal/）。文件名带日期；不传 day 就是画像时区的今天。"""
+    day = day or export_day(profile)
+    return ws.internal / f"{profile.name}_pool_{day}.xlsx"
 
 
-def xlsx_path_public(ws: Workspace, profile: Profile) -> Path:
-    """脱敏版 Excel 的位置（无用户名，放 exports/ 可外传）。"""
-    return ws.exports / f"{profile.name}_pool.xlsx"
+def xlsx_path_public(ws: Workspace, profile: Profile, day: str | None = None) -> Path:
+    """脱敏版 Excel（exports/，可外传）。文件名带日期，与内部版同一天。"""
+    day = day or export_day(profile)
+    return ws.exports / f"{profile.name}_pool_{day}.xlsx"
 
 
 def stats(con: sqlite3.Connection) -> dict[str, Any]:
