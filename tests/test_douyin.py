@@ -87,7 +87,7 @@ class DouyinNormalizeTest(DouyinFixture):
         self.assertEqual(sorted(r["comment_id"] for r in recs), ["cmt1", "cmt2", "cmt3"])   # 重复的只留一条
         r = next(r for r in recs if r["comment_id"] == "cmt1")
         self.assertEqual(r["post_title"], "台州感统训练课体验")
-        self.assertEqual(r["post_url"], "https://www.douyin.com/video/7600000000000000001")
+        self.assertEqual(r["post_url"], "https://www.iesdouyin.com/share/video/7600000000000000001")
         self.assertEqual(r["search_keyword"], "台州感统训练")
         self.assertEqual(r["nickname"], "小明妈妈")
         self.assertEqual(r["platform"], "dy")
@@ -112,7 +112,7 @@ class DouyinPipelineTest(DouyinFixture):
         self.assertEqual(row[7][1], str(xlsx.S_RED_LINK))                 # ready 行：红底 + 蓝色链接
         with zipfile.ZipFile(path) as z:
             rels = ET.fromstring(z.read("xl/worksheets/_rels/sheet1.xml.rels"))
-        self.assertEqual([r.get("Target") for r in rels], ["https://www.douyin.com/video/7600000000000000001"])
+        self.assertEqual([r.get("Target") for r in rels], ["https://www.iesdouyin.com/share/video/7600000000000000001"])
 
     def test_platform_label_covers_both_codes(self):
         self.assertEqual(pool.PLATFORM_LABEL["dy"], "抖音")

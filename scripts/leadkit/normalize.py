@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import csv
+import re
 from datetime import datetime, tzinfo
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,33 @@ def clean_url(url: str) -> str:
     if "token" in base.lower():  # 令牌不在 query 里的极端情况：宁可拒绝也不入库
         raise ValueError(f"URL 路径里含 token，拒绝处理: {base[:60]}")
     return base
+
+
+# 抖音网页 /video/<id> 在未登录桌面端常落到 byted_acrawler 空壳，工作人员点开像「失效」。
+# MediaCrawler 写入的 aweme_url 本身就是拼出来的 /video/ 链，不是接口返回的可分享短链。
+# 统一改写成 iesdouyin 公开分享形式；小红书等其它平台不动。
+_DY_ID_RE = re.compile(
+    r"(?:/video/|/note/|/slides/)(\d{6,})|(?:[?&]modal_id=)(\d{6,})"
+)
+
+
+def douyin_share_url(aweme_id: str) -> str:
+    """抖音公开分享链（可在微信/浏览器唤起或打开分享页）。"""
+    return f"https://www.iesdouyin.com/share/video/{aweme_id}"
+
+
+def canonical_post_url(platform: str, post_id: str = "", post_url: str = "") -> str:
+    """入库/导出前的帖子链接规范化：去 token，并对抖音改写为公开分享链。"""
+    url = clean_url(post_url) if post_url else ""
+    if platform not in ("dy", "douyin"):
+        return url
+    aid = (post_id or "").strip()
+    if not aid.isdigit():
+        m = _DY_ID_RE.search(url or "")
+        aid = next((g for g in (m.groups() if m else ()) if g), "")
+    if aid.isdigit():
+        return douyin_share_url(aid)
+    return url
 
 
 def when(raw: str, tz: tzinfo) -> str:
@@ -88,7 +116,7 @@ def load_mediacrawler(
             pid = row.get(cm["post_id"], "")
             if pid and pid not in posts:
                 posts[pid] = {
-                    "post_url": clean_url(row.get(cm["post_url"], "")),
+                    "post_url": canonical_post_url(platform, pid, row.get(cm["post_url"], "")),
                     "post_title": row.get(cm.get("title", ""), "") or "",
                     "search_keyword": row.get(cm.get("keyword", ""), "") or "",
                     "note_text": _note_text(row, cm),
@@ -145,7 +173,7 @@ def load_generic_csv(
             "platform": platform,
             "comment_id": row.get(id_col, "") if id_col else f"row{i}",
             "post_id": "",
-            "post_url": clean_url(row.get(url_col, "")) if url_col else "",
+            "post_url": canonical_post_url(platform, "", row.get(url_col, "")) if url_col else "",
             "post_title": "",
             "search_keyword": row.get(keyword_col, "") if keyword_col else "",
             "text": row.get(text_col, "") or "",
