@@ -11,6 +11,20 @@ from leadkit.profile import load_platform_map
 from leadkit.scoring import Scorer
 
 
+class ProfileWithoutGate:
+    """包装 profile 对象，禁用 export_gate 以便测试导出逻辑本身。"""
+    def __init__(self, base_profile):
+        self._base = base_profile
+
+    def __getattr__(self, name):
+        return getattr(self._base, name)
+
+    def section(self, name):
+        if name == "export_gate":
+            return {"enabled": False}
+        return self._base.section(name)
+
+
 def write_csv(path: Path, header: list[str], rows: list[list[str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8-sig") as f:
@@ -23,7 +37,8 @@ class PipelineTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.ws = Workspace(Path(self.tmp.name)).ensure()
-        self.prof = _helpers.profile()
+        # 使用禁用门禁的 profile，以便测试导出逻辑本身
+        self.prof = ProfileWithoutGate(_helpers.profile())
         self.scorer = Scorer(self.prof)
         batch = self.ws.raw / "b1" / "xhs" / "csv"
         write_csv(batch / "search_contents_2026-10-01.csv", ["note_id", "title", "note_url", "source_keyword"],
@@ -53,8 +68,8 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual((second["new"], second["updated"]), (0, 2))
         self.assertEqual(con.execute("SELECT COUNT(*) FROM leads").fetchone()[0], 2)
 
-        public, internal, n = pool.export(con, self.ws, self.prof)
-        self.assertEqual(n, 1)
+        public, internal, n_public, n_internal = pool.export(con, self.ws, self.prof)
+        self.assertEqual(n_public, 1)  # 外发数量（门禁禁用时等于内部数量）
         header = public.read_text(encoding="utf-8-sig").splitlines()[0]
         for bad in pool.FORBIDDEN_EXPORT_COLS:
             self.assertNotIn(bad, header)

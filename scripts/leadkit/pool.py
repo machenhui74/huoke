@@ -3,7 +3,8 @@
 设计要点：
 - 入库和重打分共用同一套更新逻辑，保证「新进来的」和「改规则后重算的」判断一致；
 - 已被人点过头的线索（reach_status 在 LOCKED_REACH 里）分数和触达状态保持原样，只补三列判断；
-- 导出分两份：exports/ 下的不含昵称，可外传；internal/ 下的含昵称，仅内部对照；另有一份 Excel（internal/，含用户名，高相关行标红、排在最前、笔记链接可点）；
+- 导出分两份目录：exports/ 下的不含昵称，可外传；internal/ 下的含昵称，仅内部对照；Excel 高相关行标红、排在最前、笔记链接可点；
+- 外发用「当日增量」：{profile}_pool_{date}.xlsx 只含当天新入库线索；本地另留累计总库 {profile}_pool_all.xlsx，不要拿总库给二哥外发；
 - 任何导出都做一遍「禁止列」自检，泄露就中止。
 """
 from __future__ import annotations
@@ -18,6 +19,7 @@ from typing import Any
 
 from . import xlsx
 from .xlsx import SheetSpec
+from .export_gate import ExportGate, GateResult
 from .geo import GEO_LABEL
 from .logger import get_logger
 from .paths import Workspace
@@ -246,6 +248,8 @@ XLSX_COLUMNS: list[tuple[str, str, float, bool, bool]] = [
 XLSX_GEO_COLUMN = ("geo_label", "地域把握", 12, False, False)
 # 「排除原因」列：仅出现在 AI智能排除 工作表
 XLSX_EXCLUDE_REASON_COLUMN = ("exclude_reason", "排除原因", 24, False, False)
+# 「门禁结果」列：导出门禁的通过/拒绝原因（仅内部对照）
+XLSX_GATE_COLUMN = ("gate_result", "门禁结果", 40, False, False)
 DEFAULT_HIGHLIGHT = ("ready",)  # 默认只有 ready（高意向）标红；profile 的 [export] highlight_status 可改
 # 平台代号 → 表里显示的名字（未知代号原样显示）
 PLATFORM_LABEL = {"xhs": "小红书", "dy": "抖音", "douyin": "抖音"}
@@ -299,25 +303,48 @@ def _write_csv(path: Path, rows: list[sqlite3.Row], cols: list[tuple[str, str]])
 
 
 def _xlsx_cols(with_geo: bool = False, with_nickname: bool = True,
-               with_exclude_reason: bool = False) -> list[tuple[str, str, float, bool, bool]]:
+               with_exclude_reason: bool = False, with_gate: bool = False) -> list[tuple[str, str, float, bool, bool]]:
     """根据选项构建列定义列表。"""
     cols = [c for c in XLSX_COLUMNS if with_nickname or c[0] != "nickname"]
     if with_geo:
         cols = cols + [XLSX_GEO_COLUMN]
     if with_exclude_reason:
         cols = cols + [XLSX_EXCLUDE_REASON_COLUMN]
+    if with_gate:
+        cols = cols + [XLSX_GATE_COLUMN]
     return cols
 
 
 def _build_sheet_spec(name: str, rows: list[sqlite3.Row], red: frozenset[int],
                       with_geo: bool = False, with_nickname: bool = True,
-                      with_exclude_reason: bool = False) -> SheetSpec:
-    """构建一个工作表的规格，用于多工作表导出。"""
-    cols = _xlsx_cols(with_geo, with_nickname, with_exclude_reason)
+                      with_exclude_reason: bool = False, with_gate: bool = False,
+                      gate_results: dict[str, GateResult] | None = None) -> SheetSpec:
+    """构建一个工作表的规格，用于多工作表导出。
+
+    gate_results: {comment_id: GateResult} 门禁判断结果字典（仅 with_gate=True 时使用）
+    """
+    cols = _xlsx_cols(with_geo, with_nickname, with_exclude_reason, with_gate)
+    gate_results = gate_results or {}
+
+    def row_cells(r: sqlite3.Row) -> list[Any]:
+        cells = []
+        for f, *_ in cols:
+            if f == "gate_result":
+                gr = gate_results.get(r["comment_id"])
+                if gr is None:
+                    cells.append("")
+                elif gr.passed:
+                    cells.append(f"✓ {gr.evidence}")
+                else:
+                    cells.append(f"✗ {gr.reason}")
+            else:
+                cells.append(_cell(r, f))
+        return cells
+
     return SheetSpec(
         name=name,
         headers=[h for _, h, *_ in cols],
-        rows=[[_cell(r, f) for f, *_ in cols] for r in rows],
+        rows=[row_cells(r) for r in rows],
         red_rows=red,
         widths=[w for _, _, w, *_ in cols],
         number_cols=frozenset(i for i, c in enumerate(cols) if c[3]),
@@ -342,91 +369,206 @@ def export_day(profile: Profile) -> str:
     return datetime.now(profile.tz).strftime("%Y-%m-%d")
 
 
-def export(con: sqlite3.Connection, ws: Workspace, profile: Profile,
-           statuses: tuple[str, ...] = ("ready", "needs_review")) -> tuple[Path, Path, int]:
-    """导出人工池。返回 (脱敏 CSV, 内部对照 CSV, 行数)。
+_LEAD_SELECT = """SELECT l.platform, l.comment_id, l.note_id AS post_id, l.comment_text, l.post_url, l.search_keyword,
+               l.intent_score, l.parent_likely, l.problem, l.strength, l.tags, l.status, l.geo_hit, l.target_region,
+               l.reach_status, l.nickname, l.commented_at, l.geo_state, l.exclude_reason,
+               COALESCE(r.note_title, '') AS post_title
+            FROM leads l LEFT JOIN raw_comments r ON r.platform = l.platform AND r.comment_id = l.comment_id"""
 
-    文件名带当天日期，例如 internal/<profile>_pool_2026-10-06.xlsx（含用户名），
-    exports/ 下同名的是脱敏版。同一天重导只刷新这一天，历史日期保留。
-    两个 Excel 都有两个工作表：
-      - Sheet1「线索池」：ready + needs_review
-      - Sheet2「AI智能排除」：所有 excluded 线索，按意向分降序，包含排除原因
-    三个文件的表头和取值全部是中文；CSV 的前几列与 Excel 一致，后面多几列方便筛选。
-    排序：先按状态分层（ready 在前、needs_review 其次），层内按意向分从高到低。
-    不能只按分数排——否则某条 needs_review 分数偏高时会插到 ready 前面，「高相关排在最前」就不成立了。
-    标红：状态在 highlight_status（默认 ready）里的整行，Excel 里浅红底 + 深红字，CSV 无颜色。
+
+def _query_pool_rows(con: sqlite3.Connection, statuses: tuple[str, ...],
+                     day: str | None = None) -> list[sqlite3.Row]:
+    """人工池（ready/needs_review）。day 非空时只取 created_at 落在该日的增量。"""
+    marks = ",".join("?" for _ in statuses)
+    sql = f"""{_LEAD_SELECT}
+            WHERE l.status IN ({marks})"""
+    args: list[Any] = list(statuses)
+    if day:
+        sql += " AND substr(l.created_at, 1, 10) = ?"
+        args.append(day)
+    sql += """
+            ORDER BY CASE l.status WHEN 'ready' THEN 0 WHEN 'needs_review' THEN 1 ELSE 2 END,
+                     l.intent_score DESC, l.platform, l.comment_id"""
+    return list(con.execute(sql, args))
+
+
+def _query_excluded_rows(con: sqlite3.Connection, day: str | None = None) -> list[sqlite3.Row]:
+    """排除线索。day 非空时只取当天新入库的排除行。"""
+    sql = f"""{_LEAD_SELECT}
+            WHERE l.status = 'excluded'"""
+    args: list[Any] = []
+    if day:
+        sql += " AND substr(l.created_at, 1, 10) = ?"
+        args.append(day)
+    sql += " ORDER BY l.intent_score DESC, l.platform, l.comment_id"
+    return list(con.execute(sql, args))
+
+
+def _write_export_bundle(ws: Workspace, profile: Profile, pool_rows: list[sqlite3.Row],
+                         excluded_rows: list[sqlite3.Row], *, public_xlsx: Path,
+                         internal_xlsx: Path, public_csv: Path, internal_csv: Path,
+                         label: str, gate: ExportGate | None = None) -> tuple[int, int]:
+    """把一套线索池+排除表写到指定路径。
+
+    返回 (外发人工池行数, 内部人工池行数)。
+    启用门禁时，外发表只包含通过门禁的线索；内部表包含所有线索并附带门禁结果。
+    """
+    highlight = set(profile.section("export").get("highlight_status", DEFAULT_HIGHLIGHT))
+    with_geo = bool(profile.section("export").get("xlsx_geo_column", False))
+
+    # 应用导出门禁
+    gate_results: dict[str, GateResult] = {}
+    public_pool_rows: list[sqlite3.Row] = []
+    public_excluded_rows: list[sqlite3.Row] = []
+
+    if gate and gate.enabled:
+        for r in pool_rows:
+            gr = gate.check(dict(r))
+            gate_results[r["comment_id"]] = gr
+            if gr.passed:
+                public_pool_rows.append(r)
+        for r in excluded_rows:
+            gr = gate.check(dict(r))
+            gate_results[r["comment_id"]] = gr
+            if gr.passed:
+                public_excluded_rows.append(r)
+        LOG.info("导出门禁：人工池 %d → %d 通过，排除表 %d → %d 通过",
+                 len(pool_rows), len(public_pool_rows), len(excluded_rows), len(public_excluded_rows))
+    else:
+        public_pool_rows = pool_rows
+        public_excluded_rows = excluded_rows
+
+    # 计算标红行（在过滤后的列表中重新计算索引）
+    red_internal = frozenset(i for i, r in enumerate(pool_rows) if r["status"] in highlight)
+    red_public = frozenset(i for i, r in enumerate(public_pool_rows) if r["status"] in highlight)
+
+    # 写内部 CSV（包含所有线索）
+    _write_csv(internal_csv, pool_rows, csv_columns(True, with_geo))
+
+    # 写外发 CSV（仅通过门禁的线索）
+    _write_csv(public_csv, public_pool_rows, csv_columns(False, with_geo))
+    _check_header(public_csv)
+
+    # 内部 Excel：包含所有线索 + 门禁结果列
+    with_gate = bool(gate and gate.enabled)
+    pool_sheet_internal = _build_sheet_spec(
+        "线索池", pool_rows, red_internal, with_geo, with_nickname=True,
+        with_gate=with_gate, gate_results=gate_results)
+    excluded_sheet_internal = _build_sheet_spec(
+        "AI智能排除", excluded_rows, frozenset(), with_geo, with_nickname=True,
+        with_exclude_reason=True, with_gate=with_gate, gate_results=gate_results)
+
+    # 外发 Excel：仅通过门禁的线索
+    pool_sheet_public = _build_sheet_spec(
+        "线索池", public_pool_rows, red_public, with_geo, with_nickname=False)
+    excluded_sheet_public = _build_sheet_spec(
+        "AI智能排除", public_excluded_rows, frozenset(), with_geo, with_nickname=False, with_exclude_reason=True)
+
+    xlsx.write_xlsx_multi(internal_xlsx, [pool_sheet_internal, excluded_sheet_internal])
+    xlsx.write_xlsx_multi(public_xlsx, [pool_sheet_public, excluded_sheet_public])
+
+    LOG.info("导出%s：内部人工池 %d 条 | 外发人工池 %d 条（标红 %d）+ 排除 %d 条 → %s / %s",
+             label, len(pool_rows), len(public_pool_rows), len(red_public), len(public_excluded_rows),
+             internal_xlsx, public_xlsx)
+    return len(public_pool_rows), len(pool_rows)
+
+
+def export(con: sqlite3.Connection, ws: Workspace, profile: Profile,
+           statuses: tuple[str, ...] = ("ready", "needs_review"),
+           day: str | None = None,
+           write_full: bool = True) -> tuple[Path, Path, int, int]:
+    """导出人工池。返回 (当日增量脱敏 CSV, 当日增量内部 CSV, 当日外发行数, 当日内部行数)。
+
+    外发约定（马哥 2026-10-25）：
+      - exports/<profile>_pool_<date>.xlsx = **当日增量**（sheet1 线索池 + sheet2 AI智能排除
+        都只含当天新入库），交给二哥企微发给马哥；
+      - exports/<profile>_pool_all.xlsx = **累计总库**，只留本地自查，不要外发。
+    internal/ 下同名规则（含用户名）。同一天重导只刷新当天增量 + 总库，其它日期增量保留。
+    排序：ready 在前，层内按意向分从高到低。标红：highlight_status（默认 ready）。
+
+    导出硬门禁（[export_gate] 启用时）：
+      - 外发表只包含同时满足三项条件的线索：地域本人自述、评论时效、服务需求
+      - 内部表包含所有线索，附带门禁判断结果列
+      - 0 条合格时外发表为空，内部表仍完整保留
     """
     ws.exports.mkdir(parents=True, exist_ok=True)
     ws.internal.mkdir(parents=True, exist_ok=True)
-    marks = ",".join("?" for _ in statuses)
+    day = day or export_day(profile)
 
-    # 查询人工池线索（ready + needs_review）
-    pool_rows = list(con.execute(
-        f"""SELECT l.platform, l.comment_id, l.note_id AS post_id, l.comment_text, l.post_url, l.search_keyword,
-               l.intent_score, l.parent_likely, l.problem, l.strength, l.tags, l.status, l.geo_hit, l.target_region,
-               l.reach_status, l.nickname, l.commented_at, l.geo_state, l.exclude_reason,
-               COALESCE(r.note_title, '') AS post_title
-            FROM leads l LEFT JOIN raw_comments r ON r.platform = l.platform AND r.comment_id = l.comment_id
-            WHERE l.status IN ({marks})
-            ORDER BY CASE l.status WHEN 'ready' THEN 0 WHEN 'needs_review' THEN 1 ELSE 2 END,
-                     l.intent_score DESC, l.platform, l.comment_id""", statuses))
+    # 初始化导出门禁
+    gate = ExportGate(profile)
 
-    # 查询排除线索（excluded），按意向分降序排列
-    excluded_rows = list(con.execute(
-        """SELECT l.platform, l.comment_id, l.note_id AS post_id, l.comment_text, l.post_url, l.search_keyword,
-               l.intent_score, l.parent_likely, l.problem, l.strength, l.tags, l.status, l.geo_hit, l.target_region,
-               l.reach_status, l.nickname, l.commented_at, l.geo_state, l.exclude_reason,
-               COALESCE(r.note_title, '') AS post_title
-            FROM leads l LEFT JOIN raw_comments r ON r.platform = l.platform AND r.comment_id = l.comment_id
-            WHERE l.status = 'excluded'
-            ORDER BY l.intent_score DESC, l.platform, l.comment_id"""))
-
-    highlight = set(profile.section("export").get("highlight_status", DEFAULT_HIGHLIGHT))
-    red = frozenset(i for i, r in enumerate(pool_rows) if r["status"] in highlight)
-    with_geo = bool(profile.section("export").get("xlsx_geo_column", False))
-
-    # CSV 只导出人工池（ready + needs_review），不包含 excluded。文件名带日期，避免第二天盖掉前一天。
-    day = export_day(profile)
+    day_pool = _query_pool_rows(con, statuses, day=day)
+    day_excluded = _query_excluded_rows(con, day=day)
     public_csv = ws.exports / f"{profile.name}_pool_{day}.csv"
     internal_csv = ws.internal / f"{profile.name}_pool_with_nickname_{day}.csv"
-    _write_csv(public_csv, pool_rows, csv_columns(False, with_geo))
-    _check_header(public_csv)
-    _write_csv(internal_csv, pool_rows, csv_columns(True, with_geo))
+    n_public, n_internal = _write_export_bundle(
+        ws, profile, day_pool, day_excluded,
+        public_xlsx=xlsx_path_public(ws, profile, day),
+        internal_xlsx=xlsx_path(ws, profile, day),
+        public_csv=public_csv,
+        internal_csv=internal_csv,
+        label=f"当日增量 {day}",
+        gate=gate,
+    )
 
-    # 构建双工作表 Excel
-    # Sheet1: 线索池（人工池）
-    pool_sheet_internal = _build_sheet_spec("线索池", pool_rows, red, with_geo, with_nickname=True)
-    pool_sheet_public = _build_sheet_spec("线索池", pool_rows, red, with_geo, with_nickname=False)
+    if write_full:
+        full_pool = _query_pool_rows(con, statuses, day=None)
+        full_excluded = _query_excluded_rows(con, day=None)
+        _write_export_bundle(
+            ws, profile, full_pool, full_excluded,
+            public_xlsx=xlsx_path_public_all(ws, profile),
+            internal_xlsx=xlsx_path_all(ws, profile),
+            public_csv=ws.exports / f"{profile.name}_pool_all.csv",
+            internal_csv=ws.internal / f"{profile.name}_pool_with_nickname_all.csv",
+            label="累计总库",
+            gate=gate,
+        )
 
-    # Sheet2: AI智能排除（包含排除原因列，无标红）
-    excluded_sheet_internal = _build_sheet_spec(
-        "AI智能排除", excluded_rows, frozenset(), with_geo, with_nickname=True, with_exclude_reason=True)
-    excluded_sheet_public = _build_sheet_spec(
-        "AI智能排除", excluded_rows, frozenset(), with_geo, with_nickname=False, with_exclude_reason=True)
+    return public_csv, internal_csv, n_public, n_internal
 
-    # 写入内部版 Excel（含用户名）
-    xlsx.write_xlsx_multi(xlsx_path(ws, profile), [pool_sheet_internal, excluded_sheet_internal])
 
-    # 写入公开版 Excel（脱敏，无用户名）
-    public_xlsx = xlsx_path_public(ws, profile)
-    xlsx.write_xlsx_multi(public_xlsx, [pool_sheet_public, excluded_sheet_public])
+def repair_douyin_urls(con: sqlite3.Connection) -> dict[str, int]:
+    """把库里已有的抖音 /video/ 链改写成 iesdouyin 公开分享链。返回更新行数。"""
+    from .normalize import canonical_post_url
 
-    LOG.info("导出人工池 %d 条（标红 %d）+ 排除 %d 条：Excel %s / %s（脱敏）；CSV %s（脱敏）/ %s（含昵称）",
-             len(pool_rows), len(red), len(excluded_rows),
-             xlsx_path(ws, profile), public_xlsx, public_csv, internal_csv)
-    return public_csv, internal_csv, len(pool_rows)
+    counts = {"leads": 0, "raw_comments": 0}
+    for table in ("leads", "raw_comments"):
+        n = 0
+        rows = list(con.execute(
+            f"SELECT rowid, platform, note_id AS post_id, post_url FROM {table} "
+            f"WHERE platform IN ('dy', 'douyin')"))
+        for r in rows:
+            new = canonical_post_url(r["platform"], r["post_id"], r["post_url"])
+            if new and new != r["post_url"]:
+                con.execute(f"UPDATE {table} SET post_url=? WHERE rowid=?", (new, r["rowid"]))
+                n += 1
+        counts[table] = n
+    con.commit()
+    LOG.info("抖音链接重写：leads %d / raw_comments %d", counts["leads"], counts["raw_comments"])
+    return counts
 
 
 def xlsx_path(ws: Workspace, profile: Profile, day: str | None = None) -> Path:
-    """含用户名的 Excel（internal/）。文件名带日期；不传 day 就是画像时区的今天。"""
+    """当日增量、含用户名的 Excel（internal/）。不传 day 就是画像时区的今天。"""
     day = day or export_day(profile)
     return ws.internal / f"{profile.name}_pool_{day}.xlsx"
 
 
 def xlsx_path_public(ws: Workspace, profile: Profile, day: str | None = None) -> Path:
-    """脱敏版 Excel（exports/，可外传）。文件名带日期，与内部版同一天。"""
+    """当日增量脱敏 Excel（exports/，可外传给马哥）。"""
     day = day or export_day(profile)
     return ws.exports / f"{profile.name}_pool_{day}.xlsx"
+
+
+def xlsx_path_all(ws: Workspace, profile: Profile) -> Path:
+    """累计总库、含用户名（internal/，仅自查）。"""
+    return ws.internal / f"{profile.name}_pool_all.xlsx"
+
+
+def xlsx_path_public_all(ws: Workspace, profile: Profile) -> Path:
+    """累计总库脱敏版（exports/，仅自查，不要外发）。"""
+    return ws.exports / f"{profile.name}_pool_all.xlsx"
 
 
 def stats(con: sqlite3.Connection) -> dict[str, Any]:

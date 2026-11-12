@@ -6,11 +6,14 @@ import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 import zipfile
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import _helpers
 from leadkit import cli, normalize, pool, xlsx
 from leadkit.paths import Workspace
+from leadkit.profile import Profile
 from leadkit.scoring import Scorer
 
 NS = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
@@ -202,13 +205,28 @@ class XlsxMultiSheetTest(unittest.TestCase):
         self.assertNotIn('tabSelected="1"', sheet2)
 
 
+class ProfileWithoutGate:
+    """包装 profile 对象，禁用 export_gate 以便测试导出逻辑本身而非门禁逻辑。"""
+    def __init__(self, base_profile):
+        self._base = base_profile
+
+    def __getattr__(self, name):
+        return getattr(self._base, name)
+
+    def section(self, name):
+        if name == "export_gate":
+            return {"enabled": False}
+        return self._base.section(name)
+
+
 class ExportOrderTest(unittest.TestCase):
     HEADERS = ["意向分", "问题类型", "原帖标题", "评论内容", "评论时间", "用户名", "搜索词", "笔记链接", "平台"]
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.ws = Workspace(Path(self.tmp.name)).ensure()
-        self.prof = _helpers.profile()
+        # 使用禁用门禁的 profile，以便测试导出逻辑本身
+        self.prof = ProfileWithoutGate(_helpers.profile())
         src = Path(self.tmp.name) / "in.csv"
         with src.open("w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
@@ -230,8 +248,8 @@ class ExportOrderTest(unittest.TestCase):
         self.con.commit()
 
     def export(self):
-        public, internal, n = pool.export(self.con, self.ws, self.prof)
-        return public, internal, n, read_sheet(pool.xlsx_path(self.ws, self.prof))
+        public, internal, n_public, n_internal = pool.export(self.con, self.ws, self.prof)
+        return public, internal, n_public, read_sheet(pool.xlsx_path(self.ws, self.prof))
 
     def test_filenames_are_stamped_with_today(self):
         """正式项目按天留档：同一天重导覆盖当天，不覆盖其他日期。"""
@@ -424,7 +442,100 @@ class ExportOrderTest(unittest.TestCase):
             self.assertNotIn("评论4", text)
 
 
+
+class IncrementalExportTest(unittest.TestCase):
+    """当日增量外发 vs 累计总库：增量不含历史，累计仍全量。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = Workspace(Path(self.tmp.name)).ensure()
+        self.prof = _helpers.profile()
+        src = Path(self.tmp.name) / "in.csv"
+        with src.open("w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            w.writerow(["评论", "词", "昵称", "链接"])
+            for i in range(1, 5):
+                w.writerow([f"评论{i}", "椒江感统", f"用户{i}",
+                            f"https://www.douyin.com/video/700000000000000000{i}"])
+        recs = normalize.load_generic_csv(
+            src, text_col="评论", keyword_col="词", nickname_col="昵称",
+            url_col="链接", platform="dy")
+        self.con = pool.connect(self.ws.db_path("t"))
+        pool.ingest(self.con, self.prof, Scorer(self.prof), recs, "b-today")
+        # 强制状态，方便断言行数
+        self.con.execute("UPDATE leads SET status='ready', intent_score=80 WHERE comment_text IN ('评论1','评论2')")
+        self.con.execute("UPDATE leads SET status='needs_review', intent_score=60 WHERE comment_text='评论3'")
+        self.con.execute("UPDATE leads SET status='excluded', intent_score=20, exclude_reason='低意向' WHERE comment_text='评论4'")
+        # 把评论1/评论4 伪装成昨天入库，模拟历史
+        self.con.execute(
+            "UPDATE leads SET created_at='2026-10-20 09:00:00+0800' WHERE comment_text IN ('评论1','评论4')")
+        self.con.commit()
+
+    def tearDown(self):
+        self.con.close()
+        self.tmp.cleanup()
+
+    def test_day_export_excludes_history_full_keeps_all(self):
+        """内部表按 created_at 做日增量；外发表在此基础上再做门禁过滤。"""
+        day = pool.export_day(self.prof)
+        public, _, n_public, n_internal = pool.export(self.con, self.ws, self.prof, day=day, write_full=True)
+        # 内部人工池：今天 2 条（评论2 ready + 评论3 needs_review），评论1 是历史
+        self.assertEqual(n_internal, 2)
+        # 外发人工池：门禁过滤后可能更少（测试数据"评论X"没有地域自述/服务需求，不通过门禁）
+        self.assertLessEqual(n_public, n_internal)
+        day_xlsx = pool.xlsx_path_public(self.ws, self.prof, day)
+        full_xlsx = pool.xlsx_path_public_all(self.ws, self.prof)
+        self.assertTrue(day_xlsx.is_file())
+        self.assertTrue(full_xlsx.is_file())
+        # 内部表（xlsx_path）应包含所有内部线索
+        internal_day_xlsx = pool.xlsx_path(self.ws, self.prof, day)
+        internal_s1 = read_sheet(internal_day_xlsx, 1)
+        self.assertEqual(len(internal_s1) - 1, 2)  # 内部表：今天的 2 条
+        # 外发路径仍是带日期的增量文件
+        self.assertEqual(public, self.ws.exports / f"{self.prof.name}_pool_{day}.csv")
+
+    def test_douyin_links_rewritten_to_ies_share_on_ingest(self):
+        """入库时抖音 /video/ 链应改写成 iesdouyin 公开分享链。"""
+        urls = [r[0] for r in self.con.execute("SELECT post_url FROM leads ORDER BY comment_text")]
+        self.assertTrue(all(u.startswith("https://www.iesdouyin.com/share/video/") for u in urls), urls)
+        self.assertFalse(any("www.douyin.com/video/" in u for u in urls))
+
+
+class DouyinUrlRepairTest(unittest.TestCase):
+    def test_repair_rewrites_legacy_video_urls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Workspace(Path(tmp)).ensure()
+            prof = _helpers.profile()
+            con = pool.connect(ws.db_path("t"))
+            try:
+                now = pool.stamp(prof)
+                con.execute(
+                    """INSERT INTO leads (id, platform, comment_id, note_id, comment_text, post_url, nickname,
+                       commented_at, search_keyword, intent_score, tags, parent_likely, problem, strength,
+                       status, exclude_reason, geo_hit, target_region, reach_status, scored_at, created_at, updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    ("id1", "dy", "c1", "7229948960830393640", "测", "https://www.douyin.com/video/7229948960830393640",
+                     "匿", "2026-01-01 00:00", "词", 50, "[]", 0, None, None, "needs_review", None,
+                     0, None, "pending_review", now, now, now))
+                con.execute(
+                    """INSERT INTO raw_comments (id, platform, comment_id, note_id, content, nickname, creator_hash,
+                       create_time, like_count, source_keyword, note_title, post_url, imported_at, batch_id, expire_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    ("r1", "dy", "c1", "7229948960830393640", "测", "匿", "", "2026-01-01", "0", "词", "",
+                     "https://www.douyin.com/video/7229948960830393640", now, "b", now))
+                con.commit()
+                before = con.execute("SELECT post_url FROM leads WHERE id='id1'").fetchone()[0]
+                res = pool.repair_douyin_urls(con)
+                after = con.execute("SELECT post_url FROM leads WHERE id='id1'").fetchone()[0]
+                self.assertEqual(before, "https://www.douyin.com/video/7229948960830393640")
+                self.assertEqual(after, "https://www.iesdouyin.com/share/video/7229948960830393640")
+                self.assertEqual(res, {"leads": 1, "raw_comments": 1})
+            finally:
+                con.close()
+
+
 class ScoreCommandTest(unittest.TestCase):
+
     """leadctl score（不入库的快速打分）输出的 CSV 也只能是中文。"""
 
     def test_scored_csv_has_chinese_headers_and_values(self):
@@ -443,6 +554,87 @@ class ScoreCommandTest(unittest.TestCase):
             self.assertFalse(any(c.isascii() and c.isalpha() for h in header for c in h), header)
             for raw in ("ready", "needs_review", "low_archive", "excluded"):
                 self.assertNotIn(raw, text)
+
+
+class ExportGateFilterTest(unittest.TestCase):
+    """导出门禁过滤测试：外发表只包含通过门禁的线索。"""
+
+    def setUp(self):
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = Workspace(Path(self.tmp.name)).ensure()
+        self.prof = _helpers.profile()
+        self.tz = ZoneInfo("Asia/Shanghai")
+        self.now = datetime.now(self.tz)
+        # 准备测试数据：只有部分能通过门禁
+        src = Path(self.tmp.name) / "in.csv"
+        recent_time = (self.now - timedelta(days=3)).strftime("%Y-%m-%d %H:%M")
+        old_time = "2019-03-15 10:00"
+        with src.open("w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            w.writerow(["评论", "词", "昵称", "时间"])
+            # 能通过门禁的线索：本人自述台州 + 近期 + 有服务需求
+            w.writerow(["坐标椒江，哪家托管班好，求推荐", "台州托管班", "用户1", recent_time])
+            # 地域不通过：仅地名无自述
+            w.writerow(["台州有吗", "台州托管班", "用户2", recent_time])
+            # 时效不通过：2019年旧评论
+            w.writerow(["我在台州，求推荐", "台州托管班", "用户3", old_time])
+            # 需求不通过：无服务需求词
+            w.writerow(["我在台州，不错", "台州托管班", "用户4", recent_time])
+        recs = normalize.load_generic_csv(
+            src, text_col="评论", keyword_col="词", nickname_col="昵称", platform="xhs")
+        # 手动设置 commented_at（load_generic_csv 不处理时间列）
+        for i, rec in enumerate(recs):
+            rec["created_at"] = [recent_time, recent_time, old_time, recent_time][i]
+        self.con = pool.connect(self.ws.db_path("t"))
+        pool.ingest(self.con, self.prof, Scorer(self.prof), recs, "b-gate-test")
+        # 强制所有为 ready 状态，方便测试门禁过滤
+        self.con.execute("UPDATE leads SET status='ready', intent_score=80")
+        # 设置 commented_at 以便门禁时效检查
+        self.con.execute("UPDATE leads SET commented_at=? WHERE comment_text LIKE '坐标椒江%'", (recent_time,))
+        self.con.execute("UPDATE leads SET commented_at=? WHERE comment_text='台州有吗'", (recent_time,))
+        self.con.execute("UPDATE leads SET commented_at=? WHERE comment_text LIKE '我在台州，求推荐%'", (old_time,))
+        self.con.execute("UPDATE leads SET commented_at=? WHERE comment_text LIKE '我在台州，不错%'", (recent_time,))
+        self.con.commit()
+
+    def tearDown(self):
+        self.con.close()
+        self.tmp.cleanup()
+
+    def test_gate_filters_public_keeps_internal(self):
+        """门禁过滤：外发表只有通过门禁的线索，内部表保留所有。"""
+        public, internal, n_public, n_internal = pool.export(self.con, self.ws, self.prof)
+        # 内部表应该有 4 条
+        self.assertEqual(n_internal, 4)
+        # 外发表只有 1 条能通过门禁（坐标椒江...）
+        self.assertEqual(n_public, 1)
+        # 检查外发 xlsx 内容
+        day = pool.export_day(self.prof)
+        public_xlsx = pool.xlsx_path_public(self.ws, self.prof, day)
+        internal_xlsx = pool.xlsx_path(self.ws, self.prof, day)
+        public_s1 = read_sheet(public_xlsx, 1)
+        internal_s1 = read_sheet(internal_xlsx, 1)
+        # 外发表：1 条（+ 表头）
+        self.assertEqual(len(public_s1), 2)
+        self.assertIn("椒江", public_s1[1][3][0])  # 评论内容列包含"椒江"
+        # 内部表：4 条（+ 表头）
+        self.assertEqual(len(internal_s1), 5)
+
+    def test_all_fail_gate_public_empty(self):
+        """所有线索都不通过门禁时，外发表为空但内部表完整。"""
+        # 把所有评论改成不通过门禁的
+        self.con.execute("UPDATE leads SET comment_text='台州有吗', commented_at=?",
+                         ((self.now - timedelta(days=3)).strftime("%Y-%m-%d %H:%M"),))
+        self.con.commit()
+        public, internal, n_public, n_internal = pool.export(self.con, self.ws, self.prof)
+        self.assertEqual(n_internal, 4)
+        self.assertEqual(n_public, 0)  # 外发表为空
+        # 外发 xlsx 的线索池工作表应该只有表头，没有数据行
+        day = pool.export_day(self.prof)
+        public_xlsx = pool.xlsx_path_public(self.ws, self.prof, day)
+        public_s1 = read_sheet(public_xlsx, 1)
+        self.assertEqual(len(public_s1), 1)  # 只有表头
 
 
 if __name__ == "__main__":

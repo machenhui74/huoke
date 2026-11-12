@@ -308,14 +308,19 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     con = pool.connect(db)
     try:
         counts = pool.ingest(con, prof, scorer, records, batch_id)
-        public, internal, n = pool.export(con, ws, prof)
+        public, internal, n_public, n_internal = pool.export(con, ws, prof)
     finally:
         con.close()
-    _emit(args, {"batch_id": batch_id, "records": len(records), **counts, "db": str(db), "export": str(public)},
+    gate_msg = f"（门禁过滤后外发 {n_public} 条）" if n_public != n_internal else ""
+    # machine-readable summary: daily-run.sh 用 grep 解析这行来获取合格数
+    summary_line = f"EXPORT_SUMMARY qualified={n_public} internal={n_internal} ready={counts['ready']} review={counts['needs_review']} excluded={counts['excluded']}"
+    _emit(args, {"batch_id": batch_id, "records": len(records), **counts, "db": str(db), "export": str(public),
+                 "n_public": n_public, "n_internal": n_internal},
           f"入库 {len(records)} 条（新增 {counts['new']}，更新 {counts['updated']}）\n"
           f"ready {counts['ready']} / 待复核 {counts['needs_review']} / 排除 {counts['excluded']}\n"
           f"数据库：{db}\n人工池 Excel（高相关在前并标红，含用户名，仅内部）：{pool.xlsx_path(ws, prof)}\n"
-          f"人工池 CSV（脱敏，可外传）：{public}")
+          f"人工池 CSV（脱敏，可外传）：{public}{gate_msg}\n"
+          f"{summary_line}")
     return 0
 
 
@@ -358,13 +363,17 @@ def cmd_pool(args: argparse.Namespace) -> int:
     try:
         if args.action == "rescore":
             counts = pool.rescore(con, prof, _scorer_or_die(prof), db)
-            public, _, n = pool.export(con, ws, prof)
-            _emit(args, {**counts, "export": str(public)}, f"重打分 {counts['total']} 条，改判 {counts['changed']}，冻结 {counts['locked']}\n人工池 {n} 条 → {pool.xlsx_path(ws, prof)}（Excel，高相关标红）/ {public}（CSV）")
+            public, _, n_public, n_internal = pool.export(con, ws, prof)
+            gate_msg = f"（门禁过滤后外发 {n_public} 条）" if n_public != n_internal else ""
+            _emit(args, {**counts, "export": str(public), "n_public": n_public, "n_internal": n_internal},
+                  f"重打分 {counts['total']} 条，改判 {counts['changed']}，冻结 {counts['locked']}\n"
+                  f"人工池 {n_internal} 条{gate_msg} → {pool.xlsx_path(ws, prof)}（Excel，高相关标红）/ {public}（CSV）")
         elif args.action == "export":
             statuses = tuple(s.strip() for s in args.status.split(",") if s.strip())
-            public, internal, n = pool.export(con, ws, prof, statuses)
-            _emit(args, {"rows": n, "public": str(public), "internal": str(internal)},
-                  f"导出 {n} 条（高相关在前并标红）\nExcel（含用户名，仅内部）：{pool.xlsx_path(ws, prof)}\n脱敏 CSV（可外传）：{public}\n含昵称 CSV（仅内部）：{internal}")
+            public, internal, n_public, n_internal = pool.export(con, ws, prof, statuses)
+            gate_msg = f"\n导出门禁：内部 {n_internal} 条 → 外发 {n_public} 条" if n_public != n_internal else ""
+            _emit(args, {"rows_public": n_public, "rows_internal": n_internal, "public": str(public), "internal": str(internal)},
+                  f"导出完成（高相关在前并标红）{gate_msg}\nExcel（含用户名，仅内部）：{pool.xlsx_path(ws, prof)}\n脱敏 CSV（可外传）：{public}\n含昵称 CSV（仅内部）：{internal}")
         elif args.action == "stats":
             st = pool.stats(con)
             human = "\n".join(f"{k}: {v}" for k, v in st.items())
@@ -380,6 +389,32 @@ def cmd_pool(args: argparse.Namespace) -> int:
             res = pool.purge(con, prof, dry_run=not args.yes)
             _emit(args, res, f"{'将清理' if not args.yes else '已清理'}：原始评论 {res['raw_comments']}，排除线索 {res['excluded_leads']}"
                   + ("\n（预演，加 --yes 真正删除）" if not args.yes else ""))
+        elif args.action == "repair_urls":
+            if not args.yes:
+                # 预览：统计将改写多少
+                from leadkit.normalize import canonical_post_url
+                n_leads = n_raw = 0
+                samples = []
+                for table in ("leads", "raw_comments"):
+                    for r in con.execute(
+                        f"SELECT platform, note_id, post_url FROM {table} WHERE platform IN ('dy','douyin') LIMIT 50000"):
+                        new_u = canonical_post_url(r["platform"], r["note_id"], r["post_url"])
+                        if new_u and new_u != r["post_url"]:
+                            if table == "leads":
+                                n_leads += 1
+                            else:
+                                n_raw += 1
+                            if len(samples) < 3:
+                                samples.append({"from": r["post_url"], "to": new_u, "note_id": r["note_id"]})
+                _emit(args, {"leads": n_leads, "raw_comments": n_raw, "samples": samples},
+                      f"预演：将改写 leads {n_leads} / raw_comments {n_raw} 条抖音链接（加 --yes 真正写入）\n样例：{samples}")
+            else:
+                res = pool.repair_douyin_urls(con)
+                public, _, n_public, n_internal = pool.export(con, ws, prof)
+                gate_msg = f"（门禁过滤后外发 {n_public} 条）" if n_public != n_internal else ""
+                _emit(args, {**res, "export": str(public), "day_pool_rows_public": n_public, "day_pool_rows_internal": n_internal},
+                      f"已改写抖音链接 leads {res['leads']} / raw_comments {res['raw_comments']}\n"
+                      f"已重导当日增量人工池 {n_internal} 条{gate_msg} → {public}\n累计总库 → {pool.xlsx_path_public_all(ws, prof)}")
     finally:
         con.close()
     return 0
@@ -484,7 +519,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_score)
 
     s = sub.add_parser("pool", parents=[common], help="线索池：rescore / export / stats / mark / purge")
-    s.add_argument("action", choices=["rescore", "export", "stats", "mark", "purge"])
+    s.add_argument("action", choices=["rescore", "export", "stats", "mark", "purge", "repair_urls"])
     s.add_argument("--status", default="ready,needs_review", help="export 的状态过滤")
     s.add_argument("--platform-id", dest="platform_", help="mark：平台")
     s.add_argument("--comment-id", help="mark：评论 ID")
