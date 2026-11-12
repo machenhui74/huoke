@@ -312,12 +312,15 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     finally:
         con.close()
     gate_msg = f"（门禁过滤后外发 {n_public} 条）" if n_public != n_internal else ""
+    # machine-readable summary: daily-run.sh 用 grep 解析这行来获取合格数
+    summary_line = f"EXPORT_SUMMARY qualified={n_public} internal={n_internal} ready={counts['ready']} review={counts['needs_review']} excluded={counts['excluded']}"
     _emit(args, {"batch_id": batch_id, "records": len(records), **counts, "db": str(db), "export": str(public),
                  "n_public": n_public, "n_internal": n_internal},
           f"入库 {len(records)} 条（新增 {counts['new']}，更新 {counts['updated']}）\n"
           f"ready {counts['ready']} / 待复核 {counts['needs_review']} / 排除 {counts['excluded']}\n"
           f"数据库：{db}\n人工池 Excel（高相关在前并标红，含用户名，仅内部）：{pool.xlsx_path(ws, prof)}\n"
-          f"人工池 CSV（脱敏，可外传）：{public}{gate_msg}")
+          f"人工池 CSV（脱敏，可外传）：{public}{gate_msg}\n"
+          f"{summary_line}")
     return 0
 
 
